@@ -2,6 +2,8 @@
 
 Depth effect wallpaper for Wayland.
 
+![demo](https://i.imgur.com/2dWA6mU.mp4)
+
 ## Features
 
 - **Machine Learning Depth Estimation**: Uses pre-trained models to generate depth maps from any image
