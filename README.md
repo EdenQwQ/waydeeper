@@ -2,7 +2,7 @@
 
 Depth effect wallpaper for Wayland.
 
-![demo](https://i.imgur.com/2dWA6mU.mp4)
+https://github.com/user-attachments/assets/b5e0ac11-9533-43a7-a0e1-f34e31c7652e
 
 ## Features
 
