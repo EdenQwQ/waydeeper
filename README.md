@@ -142,7 +142,8 @@ waydeeper set /path/to/wallpaper.jpg \
   --animation-speed 0.1 \
   --fps 30 \
   --active-delay 100 \
-  --idle-timeout 300
+  --idle-timeout 300 \
+  --invert-depth
 ```
 
 ### Use a specific depth estimation model
@@ -153,6 +154,16 @@ waydeeper set /path/to/wallpaper.jpg --model depth-pro-q4
 
 # Use custom model path
 waydeeper set /path/to/wallpaper.jpg --model /path/to/custom/model.onnx
+```
+
+### Invert depth map interpretation
+
+By default, the depth map is interpreted as: white = close, black = far.
+Some models (e.g. Depth Pro) produce the opposite: white = far, black = close.
+You can invert the interpretation with:
+
+```bash
+waydeeper set /path/to/wallpaper.jpg --invert-depth
 ```
 
 When no model is specified:
@@ -238,6 +249,7 @@ Available options per monitor:
 - `active_delay_ms`: Minimum time mouse must be active before animation starts (default: 150ms)
 - `idle_timeout_ms`: Time before animation stops after mouse stops (default: 500ms)
 - `model_path`: Path to the depth estimation model for this monitor
+- `invert_depth`: Invert depth map interpretation (default: false)
 
 ### Cache Structure
 

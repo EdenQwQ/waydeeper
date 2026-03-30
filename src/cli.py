@@ -59,7 +59,7 @@ def start_daemon(
     verbose=False,
     model_path=None,
     regenerate=False,
-    inverse_depth=False,
+    invert_depth=False,
 ):
     """Start a daemon process and wait for it to signal readiness.
 
@@ -101,8 +101,8 @@ def start_daemon(
         command.extend(["--model", model_path])
     if regenerate:
         command.append("--regenerate")
-    if inverse_depth:
-        command.append("--inverse-depth")
+    if invert_depth:
+        command.append("--invert-depth")
 
     if verbose:
         print(f"Starting daemon: {' '.join(command)}")
@@ -244,8 +244,8 @@ def command_set(arguments):
     # Store model path if specified
     if model_path:
         monitor_configuration["model_path"] = model_path
-    if arguments.inverse_depth:
-        monitor_configuration["inverse_depth"] = True
+    if arguments.invert_depth:
+        monitor_configuration["invert_depth"] = True
 
     configuration["monitors"][monitor] = monitor_configuration
     save_configuration(configuration)
@@ -287,7 +287,7 @@ def command_set(arguments):
         idle_timeout_ms=arguments.idle_timeout or 500.0,
         verbose=arguments.verbose,
         model_path=model_path,
-        inverse_depth=arguments.inverse_depth,
+        invert_depth=arguments.invert_depth,
     )
 
     if success:
@@ -383,7 +383,7 @@ def command_list_monitors(arguments):
             fps = monitor_config.get("fps", 60)
             active_delay = monitor_config.get("active_delay_ms", 150.0)
             idle_timeout = monitor_config.get("idle_timeout_ms", 500.0)
-            inverse_depth = monitor_config.get("inverse_depth", False)
+            invert_depth = monitor_config.get("invert_depth", False)
 
             print(f"  Monitor {monitor_id}:")
             print(f"    Status: {status}")
@@ -393,7 +393,7 @@ def command_list_monitors(arguments):
             print(f"    FPS: {fps}")
             print(f"    Active delay: {active_delay}ms")
             print(f"    Idle timeout: {idle_timeout}ms")
-            print(f"    Inverse depth: {inverse_depth}")
+            print(f"    invert depth: {invert_depth}")
     else:
         print("No monitors configured.")
         print("Use 'waydeeper set <image> -m <monitor>' to configure.")
@@ -715,9 +715,9 @@ def command_daemon(arguments):
             except FileNotFoundError as error:
                 print(f"Warning: {error}")
 
-        inverse_depth = monitor_config.get("inverse_depth", False)
-        if arguments.inverse_depth:
-            inverse_depth = True
+        invert_depth = monitor_config.get("invert_depth", False)
+        if arguments.invert_depth:
+            invert_depth = True
 
         if arguments.verbose:
             print(f"Starting daemon for monitor {monitor}: {wallpaper_path}")
@@ -736,7 +736,7 @@ def command_daemon(arguments):
             verbose=arguments.verbose,
             model_path=model_path,
             regenerate=arguments.regenerate,
-            inverse_depth=inverse_depth,
+            invert_depth=invert_depth,
         )
 
         if success:
@@ -829,7 +829,7 @@ Examples:
         help="Force regeneration of depth map even if cached",
     )
     set_parser.add_argument(
-        "--inverse-depth",
+        "--invert-depth",
         action="store_true",
         help="Invert depth map interpretation (white=far, black=near)",
     )
@@ -883,7 +883,7 @@ Examples:
         help="Force regeneration of depth map even if cached",
     )
     daemon_parser.add_argument(
-        "--inverse-depth",
+        "--invert-depth",
         action="store_true",
         help="Invert depth map interpretation (white=far, black=near)",
     )
