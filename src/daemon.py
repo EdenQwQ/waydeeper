@@ -32,6 +32,7 @@ class MonitorConfiguration:
     active_delay_ms: float = 150.0
     idle_timeout_ms: float = 500.0
     model_path: str | None = None
+    inverse_depth: bool = False
 
     def to_dict(self):
         return asdict(self)
@@ -210,6 +211,7 @@ class DepthWallpaperDaemon:
                 "fps": monitor_config.fps,
                 "smooth_animation": monitor_config.smooth_animation,
                 "animation_speed": monitor_config.animation_speed,
+                "inverse_depth": monitor_config.inverse_depth,
                 "uptime": time.time() - self.start_time if self.start_time else 0,
             }
 
@@ -257,6 +259,7 @@ class DepthWallpaperDaemon:
         idle_timeout_ms=None,
         model_path=None,
         regenerate=False,
+        inverse_depth=None,
         ready_callback=None,
     ):
         if monitor is not None:
@@ -306,6 +309,8 @@ class DepthWallpaperDaemon:
             monitor_config.idle_timeout_ms = idle_timeout_ms
         if model_path is not None:
             monitor_config.model_path = model_path
+        if inverse_depth is not None:
+            monitor_config.inverse_depth = inverse_depth
 
         self.configuration.set_monitor_config(monitor_id, monitor_config)
         self.force_regenerate = regenerate
@@ -372,6 +377,7 @@ class DepthWallpaperDaemon:
                 monitor_config.fps,
                 monitor_config.active_delay_ms,
                 monitor_config.idle_timeout_ms,
+                monitor_config.inverse_depth,
                 ready_callback,
             )
 
@@ -475,6 +481,11 @@ def create_argument_parser():
         help="Force regeneration of depth map even if cached",
     )
     parser.add_argument(
+        "--inverse-depth",
+        action="store_true",
+        help="Invert depth map interpretation (white=far, black=near)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     parser.add_argument(
@@ -524,6 +535,7 @@ def main():
             idle_timeout_ms=arguments.idle_timeout,
             model_path=arguments.model_path,
             regenerate=arguments.regenerate,
+            inverse_depth=arguments.inverse_depth,
             ready_callback=ready_callback,
         )
 

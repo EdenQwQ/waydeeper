@@ -61,9 +61,15 @@ uniform vec2 screen_resolution;
 uniform vec2 parallax_strength;
 uniform float zoom_level;
 uniform vec2 image_dimensions;
+uniform bool inverse_depth;
 
 void main() {
     float depth_value = texture(depth_texture, fragment_texture_coordinate).r;
+    
+    // Invert depth if requested (for models where white=far instead of white=near)
+    if (inverse_depth) {
+        depth_value = 1.0 - depth_value;
+    }
     
     vec2 mouse_offset_from_center = mouse_position - vec2(0.5);
     vec2 parallax_offset = mouse_offset_from_center * depth_value * parallax_strength;
@@ -106,6 +112,7 @@ class WallpaperRenderer(Gtk.GLArea):
         fps=60,
         active_delay_ms=150.0,
         idle_timeout_ms=500.0,
+        inverse_depth=False,
     ):
         super().__init__()
 
@@ -120,6 +127,7 @@ class WallpaperRenderer(Gtk.GLArea):
         self.current_mouse_position = (0.5, 0.5)
         self.parallax_strength_x = 0.02
         self.parallax_strength_y = 0.02
+        self.inverse_depth = inverse_depth
 
         self.smooth_animation = smooth_animation
         self.animation_speed = animation_speed
@@ -424,6 +432,10 @@ class WallpaperRenderer(Gtk.GLArea):
             float(self.image_dimensions[0]),
             float(self.image_dimensions[1]),
         )
+        gl.glUniform1i(
+            gl.glGetUniformLocation(self.shader_program, "inverse_depth"),
+            1 if self.inverse_depth else 0,
+        )
 
     def set_wallpaper(self, wallpaper_path, depth_path):
         if not self.get_realized():
@@ -521,6 +533,10 @@ class WallpaperRenderer(Gtk.GLArea):
         self.parallax_strength_y = strength_y
         self.queue_render()
 
+    def set_inverse_depth(self, inverse_depth):
+        self.inverse_depth = inverse_depth
+        self.queue_render()
+
 
 class WallpaperWindow(Gtk.ApplicationWindow):
     def __init__(
@@ -532,6 +548,7 @@ class WallpaperWindow(Gtk.ApplicationWindow):
         fps=60,
         active_delay_ms=150.0,
         idle_timeout_ms=500.0,
+        inverse_depth=False,
     ):
         super().__init__(application=application)
 
@@ -542,6 +559,7 @@ class WallpaperWindow(Gtk.ApplicationWindow):
         self.fps = fps
         self.active_delay_ms = active_delay_ms
         self.idle_timeout_ms = idle_timeout_ms
+        self.inverse_depth = inverse_depth
 
         self.setup_layer_shell_window()
 
@@ -602,6 +620,7 @@ class WallpaperWindow(Gtk.ApplicationWindow):
             fps=self.fps,
             active_delay_ms=self.active_delay_ms,
             idle_timeout_ms=self.idle_timeout_ms,
+            inverse_depth=self.inverse_depth,
         )
         self.renderer.set_vexpand(True)
         self.renderer.set_hexpand(True)
@@ -642,6 +661,10 @@ class WallpaperWindow(Gtk.ApplicationWindow):
         if self.renderer:
             self.renderer.set_parallax_strength(strength_x, strength_y)
 
+    def set_inverse_depth(self, inverse_depth):
+        if self.renderer:
+            self.renderer.set_inverse_depth(inverse_depth)
+
 
 class WallpaperApplication(Gtk.Application):
     def __init__(
@@ -656,6 +679,7 @@ class WallpaperApplication(Gtk.Application):
         fps=60,
         active_delay_ms=150.0,
         idle_timeout_ms=500.0,
+        inverse_depth=False,
         ready_callback=None,
     ):
         monitor_id = str(monitor).replace("-", "_").replace(".", "_")
@@ -674,6 +698,7 @@ class WallpaperApplication(Gtk.Application):
         self.fps = fps
         self.active_delay_ms = active_delay_ms
         self.idle_timeout_ms = idle_timeout_ms
+        self.inverse_depth = inverse_depth
         self.ready_callback = ready_callback
         self.window = None
         self._ready_called = False
@@ -702,6 +727,7 @@ class WallpaperApplication(Gtk.Application):
             self.fps,
             self.active_delay_ms,
             self.idle_timeout_ms,
+            self.inverse_depth,
         )
         self.window.set_parallax_strength(self.strength_x, self.strength_y)
         self.window.set_wallpaper(self.wallpaper_path, self.depth_path)
@@ -727,10 +753,11 @@ def run_wallpaper(
     fps=60,
     active_delay_ms=150.0,
     idle_timeout_ms=500.0,
+    inverse_depth=False,
     ready_callback=None,
 ):
     logger.info(
-        f"Starting wallpaper on monitor {monitor}: strength_x={strength_x}, strength_y={strength_y}, fps={fps}"
+        f"Starting wallpaper on monitor {monitor}: strength_x={strength_x}, strength_y={strength_y}, fps={fps}, inverse_depth={inverse_depth}"
     )
 
     app = WallpaperApplication(
@@ -744,6 +771,7 @@ def run_wallpaper(
         fps,
         active_delay_ms,
         idle_timeout_ms,
+        inverse_depth,
         ready_callback,
     )
     return app.run([])
