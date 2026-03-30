@@ -566,6 +566,7 @@ class WallpaperWindow(Gtk.ApplicationWindow):
     def setup_layer_shell_window(self):
         Gtk4LayerShell.init_for_window(self)
         Gtk4LayerShell.set_layer(self, Gtk4LayerShell.Layer.BACKGROUND)
+        Gtk4LayerShell.set_namespace(self, "waydeeper")
 
         Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.LEFT, True)
         Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.RIGHT, True)
