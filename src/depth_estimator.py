@@ -1,4 +1,4 @@
-"""Depth estimation using MiDaS ONNX model."""
+"""Depth estimation using ONNX model."""
 
 import logging
 import sys
@@ -27,10 +27,10 @@ def list_available_models(models_dir=None):
     """List all available ONNX models in the models directory."""
     if models_dir is None:
         models_dir = get_models_directory()
-    
+
     if not models_dir.exists():
         return []
-    
+
     models = sorted([f for f in models_dir.iterdir() if f.suffix == ".onnx"])
     return models
 
@@ -65,7 +65,7 @@ class DepthEstimator:
 
     def find_model_file(self):
         """Find the model file to use.
-        
+
         Priority:
         1. midas.onnx in models directory
         2. First available .onnx file in models directory
@@ -73,19 +73,21 @@ class DepthEstimator:
         4. Prompt user to download if nothing found
         """
         models_dir = get_models_directory()
-        
+
         # 1. Try default model (midas.onnx)
         default_path = models_dir / f"{default_model_name}.onnx"
         if default_path.exists():
             return str(default_path)
-        
+
         # 2. Try any available ONNX model in the directory
         available_models = list_available_models(models_dir)
         if available_models:
             first_model = available_models[0]
-            logger.info(f"Default model '{default_model_name}' not found, using '{first_model.stem}'")
+            logger.info(
+                f"Default model '{default_model_name}' not found, using '{first_model.stem}'"
+            )
             return str(first_model)
-        
+
         # 3. Legacy paths for backward compatibility
         legacy_paths = [
             Path(__file__).parent.parent / "models" / "model.onnx",
@@ -93,12 +95,12 @@ class DepthEstimator:
             models_dir / "model.onnx",
             Path("/usr/share/waydeeper/models/model.onnx"),
         ]
-        
+
         for path in legacy_paths:
             if path.exists():
                 logger.info(f"Using legacy model at: {path}")
                 return str(path)
-        
+
         # 4. No models found - prompt user
         prompt_user_for_model_download()
 
@@ -111,7 +113,9 @@ class DepthEstimator:
         except ImportError as error:
             raise ImportError("onnxruntime is required") from error
 
-        logger.info(f"Loading depth estimation model: {self.model_name} ({self.model_path})")
+        logger.info(
+            f"Loading depth estimation model: {self.model_name} ({self.model_path})"
+        )
 
         available_providers = ort.get_available_providers()
         preferred_providers = [

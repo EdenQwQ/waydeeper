@@ -182,12 +182,17 @@ def command_set(arguments):
         model_name = None  # Will be determined by depth_estimator
 
     if model_name:
-        print(f"Generating depth map for {image_path} using model '{model_name}'...", flush=True)
+        print(
+            f"Generating depth map for {image_path} using model '{model_name}'...",
+            flush=True,
+        )
     else:
         print(f"Generating depth map for {image_path}...", flush=True)
 
     try:
-        depth_path = daemon.pregenerate_depth_map(image_path, model_path=model_path, force_regenerate=arguments.regenerate)
+        depth_path = daemon.pregenerate_depth_map(
+            image_path, model_path=model_path, force_regenerate=arguments.regenerate
+        )
         # Get the actual model name used
         if daemon.depth_estimator:
             actual_model = daemon.depth_estimator.model_name
@@ -259,6 +264,7 @@ def command_set(arguments):
     if arguments.model:
         try:
             from src.models import get_model_path
+
             model_path = str(get_model_path(arguments.model))
         except FileNotFoundError:
             pass  # Will be handled by daemon
@@ -419,7 +425,9 @@ def command_pregenerate(arguments):
         print(f"Generating depth map for {image_path}...")
 
     try:
-        depth_path = daemon.pregenerate_depth_map(image_path, model_path=model_path, force_regenerate=arguments.regenerate)
+        depth_path = daemon.pregenerate_depth_map(
+            image_path, model_path=model_path, force_regenerate=arguments.regenerate
+        )
         # Get the actual model name used
         if daemon.depth_estimator:
             actual_model = daemon.depth_estimator.model_name
@@ -452,31 +460,33 @@ def command_cache(arguments):
 
 def prompt_model_selection() -> str:
     """Prompt user to select a model from available options.
-    
+
     Returns:
         The selected model name
     """
     models = list_models()
     default_model = get_default_model()
-    
+
     print("Available depth estimation models:")
     print("-" * 60)
-    
+
     for idx, model in enumerate(models, 1):
         marker = " (default)" if model.name == default_model.name else ""
         print(f"  {idx}. {model.name}{marker}")
         print(f"     {model.description}")
-    
+
     print("-" * 60)
-    
+
     while True:
         try:
-            choice = input(f"Select model [1-{len(models)}, default: {default_model.name}]: ").strip()
-            
+            choice = input(
+                f"Select model [1-{len(models)}, default: {default_model.name}]: "
+            ).strip()
+
             # Empty input means default
             if not choice:
                 return default_model.name
-            
+
             # Check if input is a number
             if choice.isdigit():
                 idx = int(choice)
@@ -485,13 +495,15 @@ def prompt_model_selection() -> str:
                 else:
                     print(f"Please enter a number between 1 and {len(models)}")
                     continue
-            
+
             # Check if input is a model name
             if choice in [m.name for m in models]:
                 return choice
-            
-            print(f"Invalid selection. Please enter a number (1-{len(models)}) or model name")
-            
+
+            print(
+                f"Invalid selection. Please enter a number (1-{len(models)}) or model name"
+            )
+
         except (EOFError, KeyboardInterrupt):
             print("\nAborted.")
             sys.exit(1)
@@ -541,32 +553,34 @@ def command_download_models(arguments):
         if proxy_handler:
             opener = urllib.request.build_opener(proxy_handler)
             urllib.request.install_opener(opener)
-        
+
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req) as response:
-            total_size = int(response.headers.get('Content-Length', 0))
+            total_size = int(response.headers.get("Content-Length", 0))
             downloaded = 0
             block_size = 8192
-            
-            with open(dest_path, 'wb') as f:
+
+            with open(dest_path, "wb") as f:
                 while True:
                     chunk = response.read(block_size)
                     if not chunk:
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
-                    
+
                     if total_size > 0:
                         percent = min(downloaded * 100 // total_size, 100)
                         bar_length = 30
                         filled = int(bar_length * percent / 100)
-                        bar = '=' * filled + '-' * (bar_length - filled)
+                        bar = "=" * filled + "-" * (bar_length - filled)
                         mb = downloaded / (1024 * 1024)
                         total_mb = total_size / (1024 * 1024)
-                        sys.stdout.write(f'\r[{bar}] {percent}% ({mb:.1f}/{total_mb:.1f} MB)')
+                        sys.stdout.write(
+                            f"\r[{bar}] {percent}% ({mb:.1f}/{total_mb:.1f} MB)"
+                        )
                         sys.stdout.flush()
-            
-            sys.stdout.write('\n')
+
+            sys.stdout.write("\n")
             sys.stdout.flush()
 
     try:
@@ -584,12 +598,17 @@ def command_download_models(arguments):
                     if member.endswith(model_info.extracted_filename):
                         target_member = member
                         break
-                
+
                 if target_member is None:
-                    raise ValueError(f"{model_info.extracted_filename} not found in the downloaded zip file")
-                
+                    raise ValueError(
+                        f"{model_info.extracted_filename} not found in the downloaded zip file"
+                    )
+
                 # Extract to model.onnx
-                with zip_file.open(target_member) as source, open(model_file_path, "wb") as target:
+                with (
+                    zip_file.open(target_member) as source,
+                    open(model_file_path, "wb") as target,
+                ):
                     target.write(source.read())
 
             temp_file.unlink()
@@ -683,6 +702,7 @@ def command_daemon(arguments):
         if arguments.model:
             try:
                 from src.models import get_model_path
+
                 model_path = str(get_model_path(arguments.model))
             except FileNotFoundError as error:
                 print(f"Warning: {error}")
@@ -747,7 +767,7 @@ Examples:
   waydeeper download-model              # Interactive model selection
   waydeeper download-model midas        # Download specific model
   waydeeper download-model depth-pro-q4
-        """
+        """,
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")

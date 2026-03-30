@@ -18,7 +18,7 @@ class ModelInfo:
     url: str
     format: ModelFormat
     extracted_filename: Optional[str] = None
-    
+
     def __post_init__(self):
         if self.format == ModelFormat.ZIP and not self.extracted_filename:
             raise ValueError("ZIP format models must specify extracted_filename")
@@ -60,20 +60,20 @@ def get_default_model() -> ModelInfo:
 def get_model_path(name_or_path: str) -> Path:
     # First check if it's a known model name
     models_directory = Path.home() / ".local" / "share" / "waydeeper" / "models"
-    
+
     if name_or_path in AVAILABLE_MODELS:
         # It's a known model name
         model_path = models_directory / f"{name_or_path}.onnx"
     else:
         # Treat as a path
         model_path = Path(name_or_path).expanduser().resolve()
-    
+
     if not model_path.exists():
         raise FileNotFoundError(
             f"Model not found: {model_path}\n"
             f"Run 'waydeeper download-model {name_or_path}' to download it."
         )
-    
+
     return model_path
 
 

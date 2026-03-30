@@ -148,7 +148,9 @@ class DepthWallpaperDaemon:
             return Path(model_path).stem
         return "midas"  # default
 
-    def ensure_depth_map_exists(self, image_path, model_path=None, force_regenerate=False):
+    def ensure_depth_map_exists(
+        self, image_path, model_path=None, force_regenerate=False
+    ):
         if self.cache_manager is None:
             self.cache_manager = DepthCache(self.configuration.cache_directory)
 
@@ -172,7 +174,9 @@ class DepthWallpaperDaemon:
 
         # Get the actual model name being used
         actual_model_name = self.depth_estimator.model_name
-        logger.info(f"Generating depth map for: {image_path} (model: {actual_model_name})")
+        logger.info(
+            f"Generating depth map for: {image_path} (model: {actual_model_name})"
+        )
 
         depth_map = self.depth_estimator.estimate(image_path)
         self.cache_manager.cache_depth(image_path, depth_map, actual_model_name)
@@ -340,7 +344,7 @@ class DepthWallpaperDaemon:
         depth_path = self.ensure_depth_map_exists(
             monitor_config.wallpaper_path,
             model_path=monitor_config.model_path,
-            force_regenerate=self.force_regenerate
+            force_regenerate=self.force_regenerate,
         )
 
         logger.info("Starting wallpaper renderer...")
@@ -382,7 +386,9 @@ class DepthWallpaperDaemon:
         self.stop_ipc()
         logger.info("Daemon stopped")
 
-    def pregenerate_depth_map(self, image_path, model_path=None, force_regenerate=False):
+    def pregenerate_depth_map(
+        self, image_path, model_path=None, force_regenerate=False
+    ):
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
 
@@ -404,8 +410,10 @@ class DepthWallpaperDaemon:
 
         print("Cached wallpapers:")
         for item in cached_items:
-            model_name = item.get('model_name', 'unknown')
-            print(f"  - {item['original_path']} ({item['width']}x{item['height']}, model: {model_name})")
+            model_name = item.get("model_name", "unknown")
+            print(
+                f"  - {item['original_path']} ({item['width']}x{item['height']}, model: {model_name})"
+            )
 
 
 def create_argument_parser():
@@ -420,8 +428,12 @@ def create_argument_parser():
     parser.add_argument(
         "-s", "--strength", type=float, default=None, help="Parallax strength"
     )
-    parser.add_argument("--strength-x", type=float, help="Parallax strength for X axis")
-    parser.add_argument("--strength-y", type=float, help="Parallax strength for Y axis")
+    parser.add_argument(
+        "--strength-x", type=float, default=None, help="Parallax strength for X axis"
+    )
+    parser.add_argument(
+        "--strength-y", type=float, default=None, help="Parallax strength for Y axis"
+    )
     parser.add_argument(
         "-m", "--monitor", type=str, default="0", help="Monitor name or index"
     )
@@ -435,7 +447,7 @@ def create_argument_parser():
         "--no-smooth-animation", action="store_true", help="Disable smooth animation"
     )
     parser.add_argument(
-        "--animation-speed", type=float, default=0.02, help="Animation speed"
+        "--animation-speed", type=float, default=0.02, help="Animation speed (0.0-1.0)"
     )
     parser.add_argument(
         "--fps", type=int, default=60, choices=[30, 60], help="Frame rate"
@@ -446,14 +458,21 @@ def create_argument_parser():
     parser.add_argument(
         "--idle-timeout", type=float, default=500.0, help="Idle timeout in ms"
     )
-    parser.add_argument("--model-path", help="Path to MiDaS ONNX model")
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Model to use for depth estimation (name or path, default: midas)",
+    )
     parser.add_argument(
         "--cache-dir",
         default=os.path.expanduser("~/.cache/waydeeper"),
         help="Cache directory",
     )
     parser.add_argument(
-        "--regenerate", action="store_true", help="Force regeneration of depth map"
+        "--regenerate",
+        action="store_true",
+        help="Force regeneration of depth map even if cached",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"

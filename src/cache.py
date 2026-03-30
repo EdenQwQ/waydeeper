@@ -64,11 +64,15 @@ class DepthCache:
             # Check if model name matches (for backward compatibility, allow missing)
             cached_model = metadata.get("model_name", "")
             if model_name and cached_model and cached_model != model_name:
-                logger.debug(f"Model mismatch for {image_path}: {cached_model} != {model_name}")
+                logger.debug(
+                    f"Model mismatch for {image_path}: {cached_model} != {model_name}"
+                )
                 return None
 
             depth_map = load_depth_map(str(depth_path))
-            logger.debug(f"Cache hit for {image_path} (model: {model_name or 'unknown'})")
+            logger.debug(
+                f"Cache hit for {image_path} (model: {model_name or 'unknown'})"
+            )
             return depth_map
 
         except Exception as error:
@@ -95,7 +99,9 @@ class DepthCache:
             with open(metadata_path, "w") as file:
                 json.dump(metadata, file)
 
-            logger.debug(f"Cached depth map for {image_path} (model: {model_name or 'unknown'})")
+            logger.debug(
+                f"Cached depth map for {image_path} (model: {model_name or 'unknown'})"
+            )
 
         except Exception as error:
             logger.warning(f"Failed to cache depth for {image_path}: {error}")
