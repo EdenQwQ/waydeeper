@@ -331,6 +331,7 @@ def command_list_monitors(arguments):
         import gi
 
         gi.require_version("Gtk", "4.0")
+        gi.require_version("Gdk", "4.0")
         gi.require_version("Gtk4LayerShell", "1.0")
         from gi.repository import Gdk
 
