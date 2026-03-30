@@ -28,7 +28,8 @@
             pkgs.gobject-introspection
             pkgs.wrapGAppsHook4
             pkgs.makeWrapper
-          ] ++ (with pkgs.python3Packages; [
+          ]
+          ++ (with pkgs.python3Packages; [
             setuptools
             wheel
           ]);
@@ -103,5 +104,51 @@
           '';
         };
       }
-    );
+    )
+    // {
+      homeManagerModules.default =
+        {
+          config,
+          lib,
+          pkgs,
+          ...
+        }:
+        let
+          cfg = config.services.waydeeper;
+        in
+        {
+          options.services.waydeeper = {
+            enable = lib.mkEnableOption "Waydeeper depth effect wallpaper daemon";
+
+            package = lib.mkOption {
+              type = lib.types.package;
+              default = self.packages.${pkgs.system}.default;
+              description = "The waydeeper package to use.";
+            };
+          };
+
+          config = lib.mkIf cfg.enable {
+            home.packages = [ cfg.package ];
+
+            systemd.user.services.waydeeper = {
+              Unit = {
+                Description = "Waydeeper depth effect wallpaper daemon";
+                After = [ "graphical-session.target" ];
+                PartOf = [ "graphical-session.target" ];
+              };
+
+              Service = {
+                Type = "forking";
+                ExecStart = "${lib.getExe cfg.package} daemon";
+                ExecStop = "${lib.getExe cfg.package} stop";
+                Restart = "on-failure";
+              };
+
+              Install = {
+                WantedBy = [ "graphical-session.target" ];
+              };
+            };
+          };
+        };
+    };
 }

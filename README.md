@@ -54,6 +54,22 @@ Then add to your system/home packages:
 }
 ```
 
+You can also use the home manager module, which includes a systemd user service:
+
+```nix
+# In your Home Manager configuration
+{ inputs, ... }:
+
+{
+  imports = [ inputs.waydeeper.homeManagerModules.default ];
+
+  services.waydeeper.enable = true;
+
+  # Optional: use a different package
+  # services.waydeeper.package = inputs.waydeeper.packages.${pkgs.system}.waydeeper;
+}
+```
+
 ### On Ubuntu/Debian
 
 #### 1. Install system dependencies
