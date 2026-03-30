@@ -24,11 +24,14 @@ class DepthCache:
         self.depth_directory.mkdir(exist_ok=True)
         self.metadata_directory.mkdir(exist_ok=True)
 
-    def compute_image_hash(self, image_path):
+    def compute_image_hash(self, image_path, model_name: str = ""):
         hasher = hashlib.blake2b(digest_size=16)
         with open(image_path, "rb") as file:
             while chunk := file.read(8192):
                 hasher.update(chunk)
+        # Include model name in hash to differentiate caches per model
+        if model_name:
+            hasher.update(model_name.encode("utf-8"))
         return hasher.hexdigest()
 
     def get_depth_file_path(self, image_hash):
@@ -37,12 +40,12 @@ class DepthCache:
     def get_metadata_file_path(self, image_hash):
         return self.metadata_directory / f"{image_hash}.json"
 
-    def get_cached_depth(self, image_path):
+    def get_cached_depth(self, image_path, model_name: str = ""):
         image_path = Path(image_path)
         if not image_path.exists():
             return None
 
-        image_hash = self.compute_image_hash(image_path)
+        image_hash = self.compute_image_hash(image_path, model_name)
         depth_path = self.get_depth_file_path(image_hash)
         metadata_path = self.get_metadata_file_path(image_hash)
 
@@ -58,17 +61,23 @@ class DepthCache:
                 logger.debug(f"Image {image_path} modified, cache invalidated")
                 return None
 
+            # Check if model name matches (for backward compatibility, allow missing)
+            cached_model = metadata.get("model_name", "")
+            if model_name and cached_model and cached_model != model_name:
+                logger.debug(f"Model mismatch for {image_path}: {cached_model} != {model_name}")
+                return None
+
             depth_map = load_depth_map(str(depth_path))
-            logger.debug(f"Cache hit for {image_path}")
+            logger.debug(f"Cache hit for {image_path} (model: {model_name or 'unknown'})")
             return depth_map
 
         except Exception as error:
             logger.warning(f"Failed to load cached depth for {image_path}: {error}")
             return None
 
-    def cache_depth(self, image_path, depth_map):
+    def cache_depth(self, image_path, depth_map, model_name: str = ""):
         image_path = Path(image_path)
-        image_hash = self.compute_image_hash(image_path)
+        image_hash = self.compute_image_hash(image_path, model_name)
         depth_path = self.get_depth_file_path(image_hash)
         metadata_path = self.get_metadata_file_path(image_hash)
 
@@ -80,12 +89,13 @@ class DepthCache:
                 "modification_time": image_path.stat().st_mtime,
                 "width": depth_map.shape[1],
                 "height": depth_map.shape[0],
+                "model_name": model_name,
             }
 
             with open(metadata_path, "w") as file:
                 json.dump(metadata, file)
 
-            logger.debug(f"Cached depth map for {image_path}")
+            logger.debug(f"Cached depth map for {image_path} (model: {model_name or 'unknown'})")
 
         except Exception as error:
             logger.warning(f"Failed to cache depth for {image_path}: {error}")

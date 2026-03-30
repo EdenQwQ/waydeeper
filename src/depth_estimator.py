@@ -1,6 +1,7 @@
 """Depth estimation using MiDaS ONNX model."""
 
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -13,10 +14,44 @@ default_input_size = (256, 256)
 imagenet_mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 imagenet_std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
+# Default model name
+default_model_name = "midas"
+
+
+def get_models_directory():
+    """Get the default models directory."""
+    return Path.home() / ".local" / "share" / "waydeeper" / "models"
+
+
+def list_available_models(models_dir=None):
+    """List all available ONNX models in the models directory."""
+    if models_dir is None:
+        models_dir = get_models_directory()
+    
+    if not models_dir.exists():
+        return []
+    
+    models = sorted([f for f in models_dir.iterdir() if f.suffix == ".onnx"])
+    return models
+
+
+def prompt_user_for_model_download():
+    """Prompt user to download a model when none is available."""
+    print("No depth estimation models found.")
+    print(f"Models directory: {get_models_directory()}")
+    print("")
+    print("Please download a model first:")
+    print("  waydeeper download-model")
+    print("")
+    print("Or specify a model path directly:")
+    print("  waydeeper set /path/to/wallpaper.jpg --model /path/to/model.onnx")
+    sys.exit(1)
+
 
 class DepthEstimator:
     def __init__(self, model_path=None):
         self.model_path = model_path or self.find_model_file()
+        self.model_name = self._get_model_name()
         self.onnx_session = None
         self.input_name = None
         self.output_name = None
@@ -24,21 +59,48 @@ class DepthEstimator:
         self.input_layout = "channels_first"  # or "channels_last"
         self.model_input_size = default_input_size
 
+    def _get_model_name(self):
+        """Get the model name from the model path."""
+        return Path(self.model_path).stem
+
     def find_model_file(self):
-        possible_paths = [
+        """Find the model file to use.
+        
+        Priority:
+        1. midas.onnx in models directory
+        2. First available .onnx file in models directory
+        3. Legacy paths (for backward compatibility)
+        4. Prompt user to download if nothing found
+        """
+        models_dir = get_models_directory()
+        
+        # 1. Try default model (midas.onnx)
+        default_path = models_dir / f"{default_model_name}.onnx"
+        if default_path.exists():
+            return str(default_path)
+        
+        # 2. Try any available ONNX model in the directory
+        available_models = list_available_models(models_dir)
+        if available_models:
+            first_model = available_models[0]
+            logger.info(f"Default model '{default_model_name}' not found, using '{first_model.stem}'")
+            return str(first_model)
+        
+        # 3. Legacy paths for backward compatibility
+        legacy_paths = [
             Path(__file__).parent.parent / "models" / "model.onnx",
             Path(__file__).parent.parent / "models" / "midas_small" / "model.onnx",
-            Path.home() / ".local" / "share" / "waydeeper" / "models" / "model.onnx",
+            models_dir / "model.onnx",
             Path("/usr/share/waydeeper/models/model.onnx"),
         ]
-
-        for path in possible_paths:
+        
+        for path in legacy_paths:
             if path.exists():
+                logger.info(f"Using legacy model at: {path}")
                 return str(path)
-
-        raise FileNotFoundError(
-            "MiDaS model not found. Run 'waydeeper download-model' to download it."
-        )
+        
+        # 4. No models found - prompt user
+        prompt_user_for_model_download()
 
     def load_model(self):
         if self.onnx_session is not None:
@@ -49,7 +111,7 @@ class DepthEstimator:
         except ImportError as error:
             raise ImportError("onnxruntime is required") from error
 
-        logger.info(f"Loading MiDaS model from: {self.model_path}")
+        logger.info(f"Loading depth estimation model: {self.model_name} ({self.model_path})")
 
         available_providers = ort.get_available_providers()
         preferred_providers = [

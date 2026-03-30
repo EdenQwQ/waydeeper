@@ -31,6 +31,7 @@ class MonitorConfiguration:
     fps: int = 60
     active_delay_ms: float = 150.0
     idle_timeout_ms: float = 500.0
+    model_path: str | None = None
 
     def to_dict(self):
         return asdict(self)
@@ -58,7 +59,6 @@ class DaemonConfiguration:
     cache_directory: str = field(
         default_factory=lambda: os.path.expanduser("~/.cache/waydeeper")
     )
-    model_path: str | None = None
     version: int = 1
 
     @classmethod
@@ -66,7 +66,7 @@ class DaemonConfiguration:
         with open(file_path, "r") as file:
             data = json.load(file)
 
-        saved_fields = {"monitors", "cache_directory", "model_path", "version"}
+        saved_fields = {"monitors", "cache_directory", "version"}
         filtered_data = {
             key: value for key, value in data.items() if key in saved_fields
         }
@@ -82,9 +82,6 @@ class DaemonConfiguration:
         default_cache = os.path.expanduser("~/.cache/waydeeper")
         if self.cache_directory != default_cache:
             data["cache_directory"] = self.cache_directory
-
-        if self.model_path is not None:
-            data["model_path"] = self.model_path
 
         with open(file_path, "w") as file:
             json.dump(data, file, indent=2)
@@ -104,6 +101,7 @@ class DaemonConfiguration:
             fps=self.fps,
             active_delay_ms=self.active_delay_ms,
             idle_timeout_ms=self.idle_timeout_ms,
+            model_path=None,
         )
 
     def set_monitor_config(self, monitor_id, config):
@@ -123,6 +121,7 @@ class DepthWallpaperDaemon:
         self.stop_event = threading.Event()
         self.ipc_socket = None
         self.start_time = None
+        self.force_regenerate = False
         self.configuration_directory.mkdir(parents=True, exist_ok=True)
 
     def load_configuration(self):
@@ -143,25 +142,48 @@ class DepthWallpaperDaemon:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def ensure_depth_map_exists(self, image_path):
+    def get_model_name_for_cache(self, model_path=None):
+        """Get the model name for cache key generation."""
+        if model_path:
+            return Path(model_path).stem
+        return "midas"  # default
+
+    def ensure_depth_map_exists(self, image_path, model_path=None, force_regenerate=False):
         if self.cache_manager is None:
             self.cache_manager = DepthCache(self.configuration.cache_directory)
 
-        cached_depth = self.cache_manager.get_cached_depth(image_path)
-        if cached_depth is not None:
-            image_hash = self.compute_image_hash(image_path)
-            depth_file_path = self.cache_manager.get_depth_file_path(image_hash)
-            return str(depth_file_path)
+        model_name = self.get_model_name_for_cache(model_path)
 
-        logger.info(f"Generating depth map for: {image_path}")
+        if not force_regenerate:
+            cached_depth = self.cache_manager.get_cached_depth(image_path, model_name)
+            if cached_depth is not None:
+                # Include model in hash for consistency
+                hasher = hashlib.blake2b(digest_size=16)
+                with open(image_path, "rb") as file:
+                    while chunk := file.read(8192):
+                        hasher.update(chunk)
+                hasher.update(model_name.encode("utf-8"))
+                image_hash = hasher.hexdigest()
+                depth_file_path = self.cache_manager.get_depth_file_path(image_hash)
+                return str(depth_file_path)
 
         if self.depth_estimator is None:
-            self.depth_estimator = DepthEstimator(self.configuration.model_path)
+            self.depth_estimator = DepthEstimator(model_path)
+
+        # Get the actual model name being used
+        actual_model_name = self.depth_estimator.model_name
+        logger.info(f"Generating depth map for: {image_path} (model: {actual_model_name})")
 
         depth_map = self.depth_estimator.estimate(image_path)
-        self.cache_manager.cache_depth(image_path, depth_map)
+        self.cache_manager.cache_depth(image_path, depth_map, actual_model_name)
 
-        image_hash = self.compute_image_hash(image_path)
+        # Compute hash with model name for the output path
+        hasher = hashlib.blake2b(digest_size=16)
+        with open(image_path, "rb") as file:
+            while chunk := file.read(8192):
+                hasher.update(chunk)
+        hasher.update(actual_model_name.encode("utf-8"))
+        image_hash = hasher.hexdigest()
         depth_file_path = self.cache_manager.get_depth_file_path(image_hash)
 
         logger.info(f"Depth map generated: {depth_file_path}")
@@ -229,6 +251,8 @@ class DepthWallpaperDaemon:
         fps=None,
         active_delay_ms=None,
         idle_timeout_ms=None,
+        model_path=None,
+        regenerate=False,
         ready_callback=None,
     ):
         if monitor is not None:
@@ -276,8 +300,11 @@ class DepthWallpaperDaemon:
             monitor_config.active_delay_ms = active_delay_ms
         if idle_timeout_ms is not None:
             monitor_config.idle_timeout_ms = idle_timeout_ms
+        if model_path is not None:
+            monitor_config.model_path = model_path
 
         self.configuration.set_monitor_config(monitor_id, monitor_config)
+        self.force_regenerate = regenerate
 
         self.configuration.wallpaper_path = monitor_config.wallpaper_path
         self.configuration.strength = monitor_config.strength
@@ -310,7 +337,11 @@ class DepthWallpaperDaemon:
 
         self.save_configuration()
 
-        depth_path = self.ensure_depth_map_exists(monitor_config.wallpaper_path)
+        depth_path = self.ensure_depth_map_exists(
+            monitor_config.wallpaper_path,
+            model_path=monitor_config.model_path,
+            force_regenerate=self.force_regenerate
+        )
 
         logger.info("Starting wallpaper renderer...")
         self.is_running = True
@@ -351,11 +382,11 @@ class DepthWallpaperDaemon:
         self.stop_ipc()
         logger.info("Daemon stopped")
 
-    def pregenerate_depth_map(self, image_path):
+    def pregenerate_depth_map(self, image_path, model_path=None, force_regenerate=False):
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
 
-        return self.ensure_depth_map_exists(image_path)
+        return self.ensure_depth_map_exists(image_path, model_path, force_regenerate)
 
     def clear_cache(self):
         if self.cache_manager is None:
@@ -373,7 +404,8 @@ class DepthWallpaperDaemon:
 
         print("Cached wallpapers:")
         for item in cached_items:
-            print(f"  - {item['original_path']} ({item['width']}x{item['height']})")
+            model_name = item.get('model_name', 'unknown')
+            print(f"  - {item['original_path']} ({item['width']}x{item['height']}, model: {model_name})")
 
 
 def create_argument_parser():
@@ -421,6 +453,9 @@ def create_argument_parser():
         help="Cache directory",
     )
     parser.add_argument(
+        "--regenerate", action="store_true", help="Force regeneration of depth map"
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     parser.add_argument(
@@ -444,8 +479,6 @@ def main():
 
     if arguments.cache_dir:
         daemon.configuration.cache_directory = arguments.cache_dir
-    if arguments.model_path:
-        daemon.configuration.model_path = arguments.model_path
 
     try:
         smooth_animation = arguments.smooth_animation
@@ -470,6 +503,8 @@ def main():
             fps=arguments.fps,
             active_delay_ms=arguments.active_delay,
             idle_timeout_ms=arguments.idle_timeout,
+            model_path=arguments.model_path,
+            regenerate=arguments.regenerate,
             ready_callback=ready_callback,
         )
 

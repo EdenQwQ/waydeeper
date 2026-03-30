@@ -15,6 +15,7 @@ from src.ipc import (
     stop_daemon,
     stop_all_daemons,
 )
+from src.models import get_model, list_models, get_default_model, ModelFormat
 
 configuration_directory = Path.home() / ".config" / "waydeeper"
 configuration_file = configuration_directory / "config.json"
@@ -56,6 +57,8 @@ def start_daemon(
     active_delay_ms=150.0,
     idle_timeout_ms=500.0,
     verbose=False,
+    model_path=None,
+    regenerate=False,
 ):
     """Start a daemon process and wait for it to signal readiness.
 
@@ -93,6 +96,10 @@ def start_daemon(
         command.append("--no-smooth-animation")
     if verbose:
         command.append("-v")
+    if model_path:
+        command.extend(["--model", model_path])
+    if regenerate:
+        command.append("--regenerate")
 
     if verbose:
         print(f"Starting daemon: {' '.join(command)}")
@@ -155,16 +162,38 @@ def command_set(arguments):
 
     monitor = arguments.monitor
 
-    print(f"Generating depth map for {image_path}...", flush=True)
-
     from src.daemon import DepthWallpaperDaemon
+    from src.models import get_model_path
 
     daemon = DepthWallpaperDaemon()
     daemon.load_configuration()
 
+    # Handle model selection
+    model_path = None
+    if arguments.model:
+        try:
+            model_path = str(get_model_path(arguments.model))
+            model_name = arguments.model
+        except FileNotFoundError as error:
+            print(f"Error: {error}")
+            return 1
+    else:
+        # Let depth_estimator auto-detect the model
+        model_name = None  # Will be determined by depth_estimator
+
+    if model_name:
+        print(f"Generating depth map for {image_path} using model '{model_name}'...", flush=True)
+    else:
+        print(f"Generating depth map for {image_path}...", flush=True)
+
     try:
-        depth_path = daemon.pregenerate_depth_map(image_path)
-        print(f"Depth map ready: {depth_path}", flush=True)
+        depth_path = daemon.pregenerate_depth_map(image_path, model_path=model_path, force_regenerate=arguments.regenerate)
+        # Get the actual model name used
+        if daemon.depth_estimator:
+            actual_model = daemon.depth_estimator.model_name
+            print(f"Depth map ready (model: {actual_model}): {depth_path}", flush=True)
+        else:
+            print(f"Depth map ready: {depth_path}", flush=True)
     except Exception as error:
         print(f"Failed to generate depth map: {error}")
         return 1
@@ -204,6 +233,9 @@ def command_set(arguments):
         monitor_configuration["active_delay_ms"] = arguments.active_delay
     if arguments.idle_timeout is not None:
         monitor_configuration["idle_timeout_ms"] = arguments.idle_timeout
+    # Store model path if specified
+    if model_path:
+        monitor_configuration["model_path"] = model_path
 
     configuration["monitors"][monitor] = monitor_configuration
     save_configuration(configuration)
@@ -222,6 +254,15 @@ def command_set(arguments):
     if arguments.smooth_animation:
         smooth = True
 
+    # Resolve model path for daemon
+    model_path = None
+    if arguments.model:
+        try:
+            from src.models import get_model_path
+            model_path = str(get_model_path(arguments.model))
+        except FileNotFoundError:
+            pass  # Will be handled by daemon
+
     success, error = start_daemon(
         image=image_path,
         monitor=monitor,
@@ -234,6 +275,7 @@ def command_set(arguments):
         active_delay_ms=arguments.active_delay or 150.0,
         idle_timeout_ms=arguments.idle_timeout or 500.0,
         verbose=arguments.verbose,
+        model_path=model_path,
     )
 
     if success:
@@ -352,16 +394,38 @@ def command_pregenerate(arguments):
         print(f"Error: Image not found: {image_path}")
         return 1
 
-    print(f"Generating depth map for {image_path}...")
-
     from src.daemon import DepthWallpaperDaemon
+    from src.models import get_model_path
 
     daemon = DepthWallpaperDaemon()
     daemon.load_configuration()
 
+    # Handle model selection
+    model_path = None
+    if arguments.model:
+        try:
+            model_path = str(get_model_path(arguments.model))
+            model_name = arguments.model
+        except FileNotFoundError as error:
+            print(f"Error: {error}")
+            return 1
+    else:
+        # Let depth_estimator auto-detect the model
+        model_name = None  # Will be determined by depth_estimator
+
+    if model_name:
+        print(f"Generating depth map for {image_path} using model '{model_name}'...")
+    else:
+        print(f"Generating depth map for {image_path}...")
+
     try:
-        depth_path = daemon.pregenerate_depth_map(image_path)
-        print(f"Depth map generated: {depth_path}")
+        depth_path = daemon.pregenerate_depth_map(image_path, model_path=model_path, force_regenerate=arguments.regenerate)
+        # Get the actual model name used
+        if daemon.depth_estimator:
+            actual_model = daemon.depth_estimator.model_name
+            print(f"Depth map generated using model '{actual_model}': {depth_path}")
+        else:
+            print(f"Depth map generated: {depth_path}")
         return 0
     except Exception as error:
         print(f"Failed to generate depth map: {error}")
@@ -386,21 +450,77 @@ def command_cache(arguments):
         return 1
 
 
+def prompt_model_selection() -> str:
+    """Prompt user to select a model from available options.
+    
+    Returns:
+        The selected model name
+    """
+    models = list_models()
+    default_model = get_default_model()
+    
+    print("Available depth estimation models:")
+    print("-" * 60)
+    
+    for idx, model in enumerate(models, 1):
+        marker = " (default)" if model.name == default_model.name else ""
+        print(f"  {idx}. {model.name}{marker}")
+        print(f"     {model.description}")
+    
+    print("-" * 60)
+    
+    while True:
+        try:
+            choice = input(f"Select model [1-{len(models)}, default: {default_model.name}]: ").strip()
+            
+            # Empty input means default
+            if not choice:
+                return default_model.name
+            
+            # Check if input is a number
+            if choice.isdigit():
+                idx = int(choice)
+                if 1 <= idx <= len(models):
+                    return models[idx - 1].name
+                else:
+                    print(f"Please enter a number between 1 and {len(models)}")
+                    continue
+            
+            # Check if input is a model name
+            if choice in [m.name for m in models]:
+                return choice
+            
+            print(f"Invalid selection. Please enter a number (1-{len(models)}) or model name")
+            
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(1)
+
+
 def command_download_models(arguments):
     import urllib.request
     import zipfile
-    import sys
 
     models_directory = Path.home() / ".local" / "share" / "waydeeper" / "models"
     models_directory.mkdir(parents=True, exist_ok=True)
 
-    download_url = (
-        "https://github.com/rocksdanister/lively-ml-models/releases/"
-        "download/v1.0.0.0/midas_small.zip"
-    )
-    zip_file_path = models_directory / "midas_small.zip"
+    # Determine which model to download
+    if arguments.model:
+        try:
+            model_info = get_model(arguments.model)
+        except KeyError as e:
+            print(f"Error: {e}")
+            return 1
+    else:
+        # Interactive selection
+        model_name = prompt_model_selection()
+        model_info = get_model(model_name)
 
-    print("Downloading MiDaS model...")
+    download_url = model_info.url
+    model_file_path = models_directory / f"{model_info.name}.onnx"
+
+    print(f"\nDownloading {model_info.name} model...")
+    print(f"URL: {download_url}")
 
     proxy_handler = None
     http_proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
@@ -450,36 +570,42 @@ def command_download_models(arguments):
             sys.stdout.flush()
 
     try:
-        download_with_progress(download_url, zip_file_path)
-        print(f"Downloaded to {zip_file_path}")
+        if model_info.format == ModelFormat.ZIP:
+            # Download ZIP and extract
+            temp_file = models_directory / f"{model_info.name}_download.zip"
+            download_with_progress(download_url, temp_file)
+            print(f"Downloaded to {temp_file}")
 
-        print("Extracting model.onnx...")
-        with zipfile.ZipFile(zip_file_path, "r") as zip_file:
-            # Find model.onnx in the zip (may be nested in a subdirectory)
-            model_member = None
-            for member in zip_file.namelist():
-                if member.endswith("model.onnx"):
-                    model_member = member
-                    break
-            
-            if model_member is None:
-                raise ValueError("model.onnx not found in the downloaded zip file")
-            
-            # Extract only model.onnx directly to the models directory
-            model_file_path = models_directory / "model.onnx"
-            with zip_file.open(model_member) as source, open(model_file_path, "wb") as target:
-                target.write(source.read())
+            print(f"Extracting {model_info.extracted_filename}...")
+            with zipfile.ZipFile(temp_file, "r") as zip_file:
+                # Find the target file in the zip
+                target_member = None
+                for member in zip_file.namelist():
+                    if member.endswith(model_info.extracted_filename):
+                        target_member = member
+                        break
+                
+                if target_member is None:
+                    raise ValueError(f"{model_info.extracted_filename} not found in the downloaded zip file")
+                
+                # Extract to model.onnx
+                with zip_file.open(target_member) as source, open(model_file_path, "wb") as target:
+                    target.write(source.read())
 
-        zip_file_path.unlink()
-        print(f"Model extracted to {model_file_path}")
+            temp_file.unlink()
+        else:
+            # Direct ONNX download
+            download_with_progress(download_url, model_file_path)
+
+        print(f"Model saved to {model_file_path}")
         print("Done!")
         return 0
 
     except Exception as error:
-        print(f"Failed to download model: {error}")
+        print(f"\nFailed to download model: {error}")
         print("\nYou can manually download the model from:")
-        print("https://github.com/rocksdanister/lively-ml-models/releases")
-        print(f"\nExtract it to: {models_directory}")
+        print(f"  {download_url}")
+        print(f"\nSave it to: {model_file_path}")
         return 1
 
 
@@ -550,6 +676,17 @@ def command_daemon(arguments):
         if arguments.idle_timeout is not None:
             idle_timeout_ms = arguments.idle_timeout
 
+        # Get model from configuration
+        model_path = monitor_config.get("model_path")
+
+        # Override with command line argument if provided
+        if arguments.model:
+            try:
+                from src.models import get_model_path
+                model_path = str(get_model_path(arguments.model))
+            except FileNotFoundError as error:
+                print(f"Warning: {error}")
+
         if arguments.verbose:
             print(f"Starting daemon for monitor {monitor}: {wallpaper_path}")
 
@@ -565,6 +702,8 @@ def command_daemon(arguments):
             active_delay_ms=active_delay_ms,
             idle_timeout_ms=idle_timeout_ms,
             verbose=arguments.verbose,
+            model_path=model_path,
+            regenerate=arguments.regenerate,
         )
 
         if success:
@@ -594,15 +733,21 @@ Examples:
   waydeeper set /path/to/wallpaper.jpg
   waydeeper set /path/to/wallpaper.jpg -m eDP-1
   waydeeper set /path/to/wallpaper.jpg -s 0.03 --strength-y 0.05
+  waydeeper set /path/to/wallpaper.jpg --model depth-pro-q4
+  waydeeper set /path/to/wallpaper.jpg --model /path/to/custom/model.onnx
+  waydeeper set /path/to/wallpaper.jpg --regenerate
   waydeeper daemon
   waydeeper daemon -m eDP-1
   waydeeper stop
   waydeeper stop -m HDMI-A-1
   waydeeper list-monitors
   waydeeper pregenerate /path/to/wallpaper.jpg
+  waydeeper pregenerate /path/to/wallpaper.jpg --model depth-pro-q4
   waydeeper cache --list
-  waydeeper download-model
-        """,
+  waydeeper download-model              # Interactive model selection
+  waydeeper download-model midas        # Download specific model
+  waydeeper download-model depth-pro-q4
+        """
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -640,6 +785,17 @@ Examples:
         "--idle-timeout", type=float, default=None, help="Idle timeout in ms"
     )
     set_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model to use for depth estimation (name or path, default: midas)",
+    )
+    set_parser.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="Force regeneration of depth map even if cached",
+    )
+    set_parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     set_parser.set_defaults(func=command_set)
@@ -648,16 +804,16 @@ Examples:
         "daemon", help="Start daemon(s) with existing configuration"
     )
     daemon_parser.add_argument(
-        "-m", "--monitor", type=str, default=None, help="Start specific monitor only"
+        "-s", "--strength", type=float, default=None, help="Parallax strength"
     )
     daemon_parser.add_argument(
-        "-s", "--strength", type=float, default=None, help="Override parallax strength"
+        "--strength-x", type=float, default=None, help="Parallax strength for X axis"
     )
     daemon_parser.add_argument(
-        "--strength-x", type=float, default=None, help="Override strength for X axis"
+        "--strength-y", type=float, default=None, help="Parallax strength for Y axis"
     )
     daemon_parser.add_argument(
-        "--strength-y", type=float, default=None, help="Override strength for Y axis"
+        "-m", "--monitor", type=str, default=None, help="Monitor name or index"
     )
     daemon_parser.add_argument(
         "--smooth-animation", action="store_true", help="Enable smooth animation"
@@ -666,16 +822,27 @@ Examples:
         "--no-smooth-animation", action="store_true", help="Disable smooth animation"
     )
     daemon_parser.add_argument(
-        "--animation-speed", type=float, default=None, help="Override animation speed"
+        "--animation-speed", type=float, default=None, help="Animation speed (0.0-1.0)"
     )
     daemon_parser.add_argument(
-        "--fps", type=int, default=None, choices=[30, 60], help="Override frame rate"
+        "--fps", type=int, default=None, choices=[30, 60], help="Frame rate"
     )
     daemon_parser.add_argument(
-        "--active-delay", type=float, default=None, help="Override active delay"
+        "--active-delay", type=float, default=None, help="Active delay in ms"
     )
     daemon_parser.add_argument(
-        "--idle-timeout", type=float, default=None, help="Override idle timeout"
+        "--idle-timeout", type=float, default=None, help="Idle timeout in ms"
+    )
+    daemon_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model to use for depth estimation (name or path, default: midas)",
+    )
+    daemon_parser.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="Force regeneration of depth map even if cached",
     )
     daemon_parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
@@ -698,6 +865,17 @@ Examples:
     )
     pregen_parser.add_argument("image", help="Path to the image")
     pregen_parser.add_argument("-v", "--verbose", action="store_true")
+    pregen_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model to use for depth estimation (name or path, default: midas)",
+    )
+    pregen_parser.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="Force regeneration of depth map even if cached",
+    )
     pregen_parser.set_defaults(func=command_pregenerate)
 
     cache_parser = subparsers.add_parser("cache", help="Manage depth map cache")
@@ -709,7 +887,13 @@ Examples:
     cache_parser.set_defaults(func=command_cache)
 
     download_parser = subparsers.add_parser(
-        "download-model", help="Download the MiDaS model"
+        "download-model", help="Download a depth estimation model"
+    )
+    download_parser.add_argument(
+        "model",
+        nargs="?",
+        default=None,
+        help="Model to download (default: prompt for selection)",
     )
     download_parser.set_defaults(func=command_download_models)
 

@@ -86,7 +86,7 @@ pip install .
 
 ## Post-Installation
 
-### Download the [MiDaS model](https://github.com/isl-org/MiDaS)
+### Download Depth Estimation Models
 
 Required for depth map generation:
 
@@ -94,9 +94,19 @@ Required for depth map generation:
 waydeeper download-model
 ```
 
-The model is downloaded and extracted to `~/.local/share/waydeeper/models/model.onnx`.
-You can use other models by replacing the `model.onnx` file with your ONNX model.
-Check out other depth estimation models [here](https://github.com/PINTO0309/PINTO_model_zoo?tab=readme-ov-file#7-depth-estimation-from-monocularstereo-images).
+This will prompt you to select from available models:
+
+- **midas** (default): Lightweight and fast, good balance of speed and quality
+- **depth-pro-q4**: Apple's Depth Pro model (4-bit quantized) - good quality, large file size, slow
+
+Models are downloaded to `~/.local/share/waydeeper/models/{model_name}.onnx`.
+
+You can also download a specific model directly:
+
+```bash
+waydeeper download-model midas
+waydeeper download-model depth-pro-q4
+```
 
 ## Usage
 
@@ -119,6 +129,31 @@ waydeeper set /path/to/wallpaper.jpg \
   --idle-timeout 300
 ```
 
+### Use a specific depth estimation model
+
+```bash
+# Use model by name
+waydeeper set /path/to/wallpaper.jpg --model depth-pro-q4
+
+# Use custom model path
+waydeeper set /path/to/wallpaper.jpg --model /path/to/custom/model.onnx
+```
+
+When no model is specified:
+
+1. Uses `midas.onnx` if available
+2. Falls back to the first `.onnx` file found in `~/.local/share/waydeeper/models/`
+3. Prompts to download a model if none are found
+
+### Force regeneration of depth map
+
+Useful when switching models or if cache is corrupted:
+
+```bash
+waydeeper set /path/to/wallpaper.jpg --regenerate
+waydeeper pregenerate /path/to/wallpaper.jpg --regenerate
+```
+
 ### Stop wallpaper
 
 ```bash
@@ -136,6 +171,22 @@ but you can pregenerate it to save time later:
 waydeeper pregenerate /path/to/wallpaper.jpg
 ```
 
+With specific model:
+
+```bash
+waydeeper pregenerate /path/to/wallpaper.jpg --model depth-pro-q4
+```
+
+### Manage cached depth maps
+
+```bash
+# List cached wallpapers (shows model used for each)
+waydeeper cache --list
+
+# Clear all cached depth maps
+waydeeper cache --clear
+```
+
 ### List configured monitors
 
 ```bash
@@ -149,20 +200,35 @@ waydeeper daemon # Starts on all configured monitors
 waydeeper daemon --monitor eDP-1 # Starts on specific monitor
 ```
 
+### Override settings when starting daemon
+
+```bash
+waydeeper daemon --strength 0.05 --fps 30 --model depth-pro-q4
+```
+
 ## Configuration
 
 Configuration is stored in `~/.config/waydeeper/config.json`.
 
-Available options:
+Available options per monitor:
 
-- `strength`: Parallax strength (default: 0.05)
-- `strength-x`: Parallax strength on X axis (overrides `strength` if set)
-- `strength-y`: Parallax strength on Y axis (overrides `strength` if set
+- `wallpaper_path`: Path to the wallpaper image
+- `strength`: Parallax strength (default: 0.02)
+- `strength_x`: Parallax strength on X axis (overrides `strength` if set)
+- `strength_y`: Parallax strength on Y axis (overrides `strength` if set)
 - `smooth_animation`: Smooth animation using easing function (default: true)
-- `
+- `animation_speed`: Animation speed multiplier (default: 0.02)
 - `fps`: Animation frame rate, 30 or 60 (default: 60)
 - `active_delay_ms`: Minimum time mouse must be active before animation starts (default: 150ms)
 - `idle_timeout_ms`: Time before animation stops after mouse stops (default: 500ms)
+- `model_path`: Path to the depth estimation model for this monitor
+
+### Cache Structure
+
+Depth maps are cached in `~/.cache/waydeeper/` with model-specific keys:
+
+- Different models generate different cache entries for the same image
+- Cache includes model name in metadata for tracking
 
 ## Acknowledgements
 
@@ -172,6 +238,7 @@ As a personal hobby project, it's not production quality and may contain bugs or
 Issues and pull requests are welcome, but I may not be able to respond to them in a timely manner.
 
 Special thanks to the developers of the [MiDaS model](https://github.com/isl-org/MiDaS)
+and the [Depth Pro model](https://github.com/apple/ml-depth-pro)
 for providing the depth estimation model used in this project.
 
 Special thanks to [rocksdanister](https://github.com/rocksdanister)
