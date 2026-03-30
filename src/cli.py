@@ -327,43 +327,6 @@ def command_stop(arguments):
 
 
 def command_list_monitors(arguments):
-    try:
-        import gi
-
-        gi.require_version("Gtk", "4.0")
-        gi.require_version("Gdk", "4.0")
-        gi.require_version("Gtk4LayerShell", "1.0")
-        from gi.repository import Gdk
-
-        display = Gdk.Display.get_default()
-        if display:
-            monitors = display.get_monitors()
-            print("System monitors:")
-            print("-" * 60)
-            for index in range(monitors.get_n_items()):
-                monitor = monitors.get_item(index)
-                if monitor:
-                    geometry = monitor.get_geometry()
-                    scale = monitor.get_scale_factor()
-
-                    name = None
-                    if hasattr(monitor, "get_connector"):
-                        name = monitor.get_connector()
-                    if not name and hasattr(monitor, "get_model"):
-                        name = monitor.get_model()
-                    if not name:
-                        name = f"Monitor-{index}"
-
-                    print(
-                        f"  {index}: {name} ({geometry.width}x{geometry.height} @ {scale}x)"
-                    )
-        else:
-            print("Could not get display information.")
-    except Exception as error:
-        print(f"Could not list system monitors: {error}")
-
-    print()
-
     configuration = load_configuration()
     configured = configuration.get("monitors", {})
     running = list_running_daemons()
