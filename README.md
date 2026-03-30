@@ -159,7 +159,7 @@ Available options:
 - `strength-x`: Parallax strength on X axis (overrides `strength` if set)
 - `strength-y`: Parallax strength on Y axis (overrides `strength` if set
 - `smooth_animation`: Smooth animation using easing function (default: true)
-- `
+- `animation_speed`: Speed of the smooth animation (default: 0.02)
 - `fps`: Animation frame rate, 30 or 60 (default: 60)
 - `active_delay_ms`: Minimum time mouse must be active before animation starts (default: 150ms)
 - `idle_timeout_ms`: Time before animation stops after mouse stops (default: 500ms)
