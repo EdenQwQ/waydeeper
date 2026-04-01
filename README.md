@@ -1,31 +1,33 @@
-# Waydeeper
+# waydeeper
 
-Depth effect wallpaper for Wayland.
+Depth effect wallpaper for Wayland — GPU-accelerated parallax from ML depth estimation.
 
 https://github.com/user-attachments/assets/b5e0ac11-9533-43a7-a0e1-f34e31c7652e
 
 ## Features
 
-- **Machine Learning Depth Estimation**: Uses pre-trained models to generate depth maps from any image
-- **GPU-Accelerated Rendering**: Uses OpenGL ES 3.0 shaders for smooth parallax effects
-- **Lazy Animation**: Only animates when mouse is active, saving resources
-- **Configurable Performance**: Choose between 30 or 60 FPS animation
-- **Smart Caching**: Depth maps are cached to avoid regeneration
-- **Multi-Monitor Support**: Independent wallpapers per monitor
+- **ML Depth Estimation**: Generates depth maps from any image using pre-trained ONNX models (MiDaS, Depth Pro)
+- **GPU-Accelerated**: OpenGL ES 3.0 shaders render the parallax effect at full resolution
+- **3D Inpainting**: True parallax with correct occlusion using ML inpainting (edge/depth/color networks)
+- **Fractional HiDPI**: Exact pixel-perfect scaling via `wp_fractional_scale_v1` + `wp_viewporter`
+- **Lazy Animation**: Only animates when the mouse is active on the background surface, with configurable delay and idle timeout
+- **Smart Caching**: Depth maps cached with blake2b hashing; model-aware cache invalidation
+- **Multi-Monitor**: Independent wallpapers per monitor with separate daemon processes
 
 ## Requirements
 
-- Wayland compositor with layer-shell support (sway, hyprland, niri, etc.)
-- Python 3.11+
+- Wayland compositor with `wlr-layer-shell` support (niri, sway, Hyprland, river, etc.)
+- OpenGL ES 3.0 capable GPU
+- ONNX Runtime (for depth estimation)
 
 ## Installation
 
-### Using Nix
+### Using Nix (Recommended)
 
 #### Run without installing
 
 ```bash
-nix run github:EdenQwQ/waydeeper
+nix run github:EdenQwQ/waydeeper-rust
 ```
 
 #### Install via Flakes
@@ -34,70 +36,99 @@ Add to your `flake.nix` inputs:
 
 ```nix
 {
-  inputs.waydeeper.url = "github:EdenQwQ/waydeeper";
+  inputs.waydeeper-rust.url = "github:EdenQwQ/waydeeper-rust";
 }
 ```
 
-Then add to your system/home packages:
+Then add to your system or home packages:
 
 ```nix
+# NixOS configuration
 { inputs, pkgs, ... }:
 {
-  environment.systemPackages = [ inputs.waydeeper.packages.${pkgs.system}.default ];
+  environment.systemPackages = [ inputs.waydeeper-rust.packages.${pkgs.system}.default ];
 }
 ```
 
 ```nix
+# Home Manager
 { inputs, pkgs, ... }:
 {
-  home.packages = [ inputs.waydeeper.packages.${pkgs.system}.default ];
+  home.packages = [ inputs.waydeeper-rust.packages.${pkgs.system}.default ];
 }
 ```
 
-You can also use the home manager module, which includes a systemd user service:
+#### Home Manager module
+
+Includes a systemd user service for auto-start:
 
 ```nix
-# In your Home Manager configuration
 { inputs, ... }:
-
 {
-  imports = [ inputs.waydeeper.homeManagerModules.default ];
-
+  imports = [ inputs.waydeeper-rust.homeManagerModules.default ];
   services.waydeeper.enable = true;
-
-  # Optional: use a different package
-  # services.waydeeper.package = inputs.waydeeper.packages.${pkgs.system}.waydeeper;
 }
 ```
 
-### On Ubuntu/Debian
+### Building from Source
 
 #### 1. Install system dependencies
 
+**Arch Linux:**
+
 ```bash
-sudo apt install -y \
-    python3-pip \
-    python3-dev \
-    libgirepository1.0-dev \
-    libcairo2-dev \
-    pkg-config \
-    libgtk-4-dev \
-    libgtk4-layer-shell-dev # Available for Ubuntu 25.04+
+sudo pacman -S --needed \
+    base-devel cmake pkg-config rustup \
+    wayland wayland-protocols \
+    libxkbcommon libglvnd openssl
+# onnxruntime (select cpu variant)
+sudo pacman -S onnxruntime-cpu
+# Set up Rust
+rustup default stable
 ```
 
-#### 2. Install Python package
+**Ubuntu 25.10+ / Debian Trixie+:**
 
 ```bash
-# Clone the repository
-git clone https://github.com/EdenQwQ/waydeeper.git
-cd waydeeper
+sudo apt install -y \
+    build-essential cmake pkg-config rustc cargo \
+    libwayland-dev wayland-protocols \
+    libxkbcommon-dev libegl-dev libglvnd-dev \
+    libssl-dev libonnxruntime-dev
+```
 
-# Create a virtual environment (recommended)
-python3 -m venv venv
-source venv/bin/activate
+#### 2. Build
 
-# Install waydeeper
-pip install .
+```bash
+git clone https://github.com/EdenQwQ/waydeeper-rust.git
+cd waydeeper-rust
+cargo build --release
+```
+
+The binary will be at `target/release/waydeeper`.
+
+#### 3. Configure ONNX Runtime path
+
+The `ort` crate loads `libonnxruntime.so` at runtime. Set the path before running:
+
+```bash
+# Arch Linux
+export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
+
+# Ubuntu / Debian
+export ORT_DYLIB_PATH=/usr/lib/x86_64-linux-gnu/libonnxruntime.so
+
+# Or add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
+```
+
+#### 4. Install manually
+
+```bash
+# Copy binary
+sudo cp target/release/waydeeper /usr/local/bin/
+
+# Or with cargo install
+cargo install --path .
 ```
 
 ## Post-Installation
@@ -110,166 +141,226 @@ Required for depth map generation:
 waydeeper download-model
 ```
 
-This will prompt you to select from available models:
+This prompts you to select from available models:
 
-- **midas** (default): Lightweight and fast, good balance of speed and quality
-- **depth-pro-q4**: Apple's Depth Pro model (4-bit quantized) - good quality, large file size, slow
+| Model             | Description                                            |
+| ----------------- | ------------------------------------------------------ |
+| `midas` (default) | MiDaS small — lightweight, fast, good quality          |
+| `depth-pro-q4`    | Apple Depth Pro (4-bit quantized) — high quality, slow |
 
-Models are downloaded to `~/.local/share/waydeeper/models/{model_name}.onnx`.
+Models are stored in `~/.local/share/waydeeper/models/`.
 
-You can also download a specific model directly:
+Downloads respect `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`
+environment variables.
+
+### Download 3D Inpainting Models (optional)
+
+Required only for `--inpaint` mode. This mode uses a 3D-photo-inpainting pipeline
+(edge/depth/color networks) to synthesise background behind foreground objects,
+producing true parallax with correct occlusion instead of a flat UV warp.
+
+Additional requirements for inpainting:
+
+- Python 3 with `torch`, `scipy`, `networkx`, and `Pillow`
+
+**Arch Linux:**
 
 ```bash
-waydeeper download-model midas
-waydeeper download-model depth-pro-q4
+sudo pacman -S python python-pip python-numpy python-scipy python-pillow python-networkx python-matplotlib
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
+
+**Ubuntu / Debian:**
+
+```bash
+sudo apt install -y python3-pip python3-numpy python3-scipy python3-pil python3-networkx python3-matplotlib
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu --break-system-packages
+```
+
+```bash
+waydeeper download-model inpaint
+```
+
+Downloads three checkpoints to `~/.local/share/waydeeper/inpaint/`:
+| File | Purpose |
+| ---------------- | ------------------------------------------ |
+| `edge-model.pth` | Predicts edge patterns around occlusion |
+| `depth-model.pth`| Inpaints depth in synthesised regions |
+| `color-model.pth`| Fills color in synthesised regions |
+
+> **Note:** The ONNX depth model (MiDaS / Depth Pro) generates the _initial_ depth
+> map from the full image. `depth-model.pth` is a separate network used _only_
+> during 3D inpainting to fill depth in occlusion holes. Both are needed for
+> inpaint mode.
 
 ## Usage
 
 ### Set a wallpaper
 
 ```bash
+# Basic usage
 waydeeper set /path/to/wallpaper.jpg
-```
 
-### Set wallpaper with custom settings
+# On a specific monitor
+waydeeper set /path/to/wallpaper.jpg -m eDP-1
 
-```bash
+# With custom settings
 waydeeper set /path/to/wallpaper.jpg \
-  --monitor eDP-1 \
+  -m eDP-1 \
   --strength 0.05 \
-  --no-smoothing-animation \
-  --animation-speed 0.1 \
-  --fps 30 \
-  --active-delay 100 \
-  --idle-timeout 300 \
+  --smooth-animation \
+  --animation-speed 0.02 \
+  --fps 60 \
+  --active-delay 150 \
+  --idle-timeout 1000 \
   --invert-depth
 ```
 
-### Use a specific depth estimation model
+### Use a specific depth model
 
 ```bash
-# Use model by name
+waydeeper set /path/to/wallpaper.jpg --model midas
 waydeeper set /path/to/wallpaper.jpg --model depth-pro-q4
-
-# Use custom model path
 waydeeper set /path/to/wallpaper.jpg --model /path/to/custom/model.onnx
 ```
 
-### Invert depth map interpretation
+### 3D Inpainting mode
 
-By default, the depth map is interpreted as: white = close, black = far.
-Some models (e.g. Depth Pro) produce the opposite: white = far, black = close.
-You can invert the interpretation with:
+Uses ML inpainting to synthesise background behind foreground objects, producing
+true parallax with correct occlusion. First run generates a 3D mesh from your image;
+subsequent runs use the cached mesh.
 
 ```bash
-waydeeper set /path/to/wallpaper.jpg --invert-depth
+# Enable 3D inpainting
+waydeeper set /path/to/wallpaper.jpg --inpaint
+
+# Adjust parallax strength
+waydeeper set /path/to/wallpaper.jpg --inpaint --strength-x 0.05 --strength-y 0.02
+
+# Regenerate both depth map and mesh
+waydeeper set /path/to/wallpaper.jpg --inpaint --regenerate
+
+# Pregenerate mesh without starting daemon
+waydeeper pregenerate /path/to/wallpaper.jpg --inpaint
 ```
 
-When no model is specified:
-
-1. Uses `midas.onnx` if available
-2. Falls back to the first `.onnx` file found in `~/.local/share/waydeeper/models/`
-3. Prompts to download a model if none are found
-
-### Force regeneration of depth map
-
-Useful when switching models or if cache is corrupted:
+### Start daemon for all configured monitors
 
 ```bash
-waydeeper set /path/to/wallpaper.jpg --regenerate
-waydeeper pregenerate /path/to/wallpaper.jpg --regenerate
+# Start all configured monitors
+waydeeper daemon
+
+# Start specific monitor
+waydeeper daemon -m eDP-1
+
+# Override settings
+waydeeper daemon --strength 0.05 --fps 30
 ```
 
 ### Stop wallpaper
 
 ```bash
-waydeeper stop # Stops all wallpapers
-waydeeper stop --monitor eDP-1 # Stops wallpaper on specific monitor
+# Stop all
+waydeeper stop
+
+# Stop specific monitor
+waydeeper stop -m eDP-1
 ```
 
-### Pregenerate depth map for an image
-
-Depth map is automatically generated and saved to `~/.cache/waydeeper/depth/`
-when setting a wallpaper,
-but you can pregenerate it to save time later:
+### Other commands
 
 ```bash
-waydeeper pregenerate /path/to/wallpaper.jpg
-```
-
-With specific model:
-
-```bash
-waydeeper pregenerate /path/to/wallpaper.jpg --model depth-pro-q4
-```
-
-### Manage cached depth maps
-
-```bash
-# List cached wallpapers (shows model used for each)
-waydeeper cache --list
-
-# Clear all cached depth maps
-waydeeper cache --clear
-```
-
-### List configured monitors
-
-```bash
+# List monitors and their status
 waydeeper list-monitors
-```
 
-### Start daemon for configured monitors
+# Pregenerate depth map (saves time later)
+waydeeper pregenerate /path/to/wallpaper.jpg
 
-```bash
-waydeeper daemon # Starts on all configured monitors
-waydeeper daemon --monitor eDP-1 # Starts on specific monitor
-```
+# Pregenerate depth map + inpaint mesh
+waydeeper pregenerate /path/to/wallpaper.jpg --inpaint
 
-### Override settings when starting daemon
+# Download depth estimation models
+waydeeper download-model midas
 
-```bash
-waydeeper daemon --strength 0.05 --fps 30 --model depth-pro-q4
+# Download inpainting models
+waydeeper download-model inpaint
+
+# Manage cache
+waydeeper cache --list
+waydeeper cache --clear
 ```
 
 ## Configuration
 
-Configuration is stored in `~/.config/waydeeper/config.json`.
+Stored in `~/.config/waydeeper/config.json`:
 
-Available options per monitor:
+```json
+{
+  "monitors": {
+    "eDP-1": {
+      "wallpaper_path": "/path/to/wallpaper.jpg",
+      "strength_x": 0.05,
+      "strength_y": 0.05,
+      "smooth_animation": true,
+      "animation_speed": 0.02,
+      "fps": 60,
+      "active_delay_ms": 150,
+      "idle_timeout_ms": 1000,
+      "model_path": "~/.local/share/waydeeper/models/midas.onnx",
+      "invert_depth": false
+    }
+  }
+}
+```
 
-- `wallpaper_path`: Path to the wallpaper image
-- `strength`: Parallax strength (default: 0.02)
-- `strength_x`: Parallax strength on X axis (overrides `strength` if set)
-- `strength_y`: Parallax strength on Y axis (overrides `strength` if set)
-- `smooth_animation`: Smooth animation using easing function (default: true)
-- `animation_speed`: Animation speed multiplier (default: 0.02)
-- `fps`: Animation frame rate, 30 or 60 (default: 60)
-- `active_delay_ms`: Minimum time mouse must be active before animation starts (default: 150ms)
-- `idle_timeout_ms`: Time before animation stops after mouse stops (default: 500ms)
-- `model_path`: Path to the depth estimation model for this monitor
-- `invert_depth`: Invert depth map interpretation (default: false)
+| Option             | Default | Description                                      |
+| ------------------ | ------- | ------------------------------------------------ |
+| `strength_x`       | 0.02    | Parallax strength on X axis                      |
+| `strength_y`       | 0.02    | Parallax strength on Y axis                      |
+| `smooth_animation` | true    | Smooth easing animation                          |
+| `animation_speed`  | 0.02    | Animation speed multiplier                       |
+| `fps`              | 60      | Frame rate (30 or 60)                            |
+| `active_delay_ms`  | 150     | Delay before animation starts after mouse enters |
+| `idle_timeout_ms`  | 500     | Time before animation stops after mouse is idle  |
+| `model_path`       | —       | Path to ONNX model                               |
+| `invert_depth`     | false   | Invert depth interpretation                      |
+| `use_inpaint`      | false   | Enable 3D inpainting mode                        |
 
-### Cache Structure
+### Cache
 
-Depth maps are cached in `~/.cache/waydeeper/` with model-specific keys:
+Depth maps are cached in `~/.cache/waydeeper/depth/` with model-specific keys.
+Inpaint PLY meshes are cached in `~/.cache/waydeeper/inpaint/` keyed by image
+content, depth map, and mesh parameters. The same image with different depth
+models or inpaint settings produces separate cache entries.
 
-- Different models generate different cache entries for the same image
-- Cache includes model name in metadata for tracking
+## Architecture
+
+```
+src/
+  main.rs            - Entry point
+  cli.rs             - CLI with subprocess-based daemon spawning
+  config.rs          - JSON config management
+  models.rs          - Model registry and download URLs
+  cache.rs           - Blake2b-hashed depth map + inpaint mesh cache
+  ipc.rs             - Unix domain socket IPC
+  depth_estimator.rs - ONNX inference + Lanczos resize + Gaussian blur
+  inpaint.rs         - Python subprocess launcher for 3D inpainting
+  mesh.rs            - Binary/ASCII PLY parser with UV + FoV metadata
+  math.rs            - Perspective/translation 4×4 matrix helpers
+  renderer.rs        - EGL context, GLSL shaders, flat + mesh modes
+  wayland.rs         - smithay-client-toolkit layer-shell + fractional scaling
+  egl_bridge.c       - C FFI for EGL/Wayland bridge
+scripts/
+  inpaint.py         - 3D inpainting pipeline (edge/depth/color ML networks)
+  networks.py        - Neural network architectures (from 3d-photo-inpainting)
+```
 
 ## Acknowledgements
 
-This project is a vibe coding project.
-Most of the code is written using [kimi-cli](https://github.com/MoonshotAI/kimi-cli).
-As a personal hobby project, it's not production quality and may contain bugs or performance issues.
-Issues and pull requests are welcome, but I may not be able to respond to them in a timely manner.
+Special thanks to:
 
-Special thanks to the developers of the [MiDaS model](https://github.com/isl-org/MiDaS)
-and the [Depth Pro model](https://github.com/apple/ml-depth-pro)
-for providing the depth estimation model used in this project.
-
-Special thanks to [rocksdanister](https://github.com/rocksdanister)
-for their work on [lively](https://github.com/rocksdanister/lively).
-I created this project because I wanted a similar depth effect wallpaper for Wayland.
-Also thanks to them for sharing the [MiDaS model weights in ONNX format](https://github.com/rocksdanister/lively-ml-models/releases).
+- [MiDaS model](https://github.com/isl-org/MiDaS) and [Depth Pro](https://github.com/apple/ml-depth-pro) for depth estimation
+- [3D Photo Inpainting](https://github.com/vt-vl-lab/3d-photo-inpainting) for the mesh inpainting pipeline
+- [rocksdanister](https://github.com/rocksdanister) for [lively](https://github.com/rocksdanister/lively) and [ONNX model weights](https://github.com/rocksdanister/lively-ml-models/releases)
+- [awww](https://github.com/BC100Dev/awww) for Wayland wallpaper daemon reference
+- [smithay-client-toolkit](https://github.com/Smithay/client-toolkit) for the Wayland client library

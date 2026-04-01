@@ -1,9 +1,17 @@
 {
-  description = "Waydeeper - GPU-accelerated depth effect wallpaper for Wayland";
+  description = "Waydeeper - GPU-accelerated depth effect wallpaper for Wayland (Rust)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    crane = {
+      url = "github:ipetkov/crane";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -11,59 +19,119 @@
       self,
       nixpkgs,
       flake-utils,
+      rust-overlay,
+      crane,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-
-        waydeeper = pkgs.python3Packages.buildPythonApplication {
-          pname = "waydeeper";
-          version = "0.1.0";
-          format = "pyproject";
-
-          src = ./.;
-
-          nativeBuildInputs = [
-            pkgs.gobject-introspection
-            pkgs.wrapGAppsHook4
-            pkgs.makeWrapper
-          ]
-          ++ (with pkgs.python3Packages; [
-            setuptools
-            wheel
-          ]);
-
-          buildInputs = [
-            pkgs.gtk4
-            pkgs.gtk4-layer-shell
-            pkgs.libadwaita
-            pkgs.wayland
-            pkgs.libGL
-            pkgs.libepoxy
-            pkgs.glib
-          ];
-
-          propagatedBuildInputs = with pkgs.python3Packages; [
-            numpy
-            pillow
-            onnxruntime
-            pygobject3
-            pyopengl
-            pyopengl-accelerate
-          ];
-
-          makeWrapperArgs = [
-            "--prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [ pkgs.gtk4-layer-shell ]}"
-          ];
-
-          meta = with pkgs.lib; {
-            description = "GPU-accelerated depth effect wallpaper for Wayland";
-            license = licenses.mit;
-            platforms = platforms.linux;
-            mainProgram = "waydeeper";
-          };
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
         };
+
+        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+          extensions = [
+            "rust-src"
+            "rust-analyzer"
+          ];
+        };
+
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+
+        # Python environment for 3D inpainting (used at runtime, not build time)
+        inpaintPythonEnv = pkgs.python3.withPackages (
+          ps: with ps; [
+            torch
+            torchvision
+            numpy
+            scipy
+            pillow
+            networkx
+            matplotlib
+          ]
+        );
+
+        # Common arguments for crane
+        commonArgs = {
+          # Include .c and .py files in the source
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              (craneLib.filterCargoSources path type)
+              || (builtins.match ".*\\.c$" path != null)
+              || (builtins.match ".*\\.py$" path != null);
+          };
+          strictDeps = true;
+
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            cmake
+            makeWrapper
+            wayland-scanner
+          ];
+
+          buildInputs =
+            with pkgs;
+            [
+              wayland
+              wayland-protocols
+              libGL
+              libglvnd
+              libxkbcommon
+              openssl
+              onnxruntime
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.libiconv
+            ];
+
+          # Set environment variables for build
+          WAYLAND_SCANNER = "${pkgs.wayland}/bin/wayland-scanner";
+          OPENSSL_DIR = "${pkgs.openssl.dev}";
+          OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
+          OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
+        };
+
+        # Build dependencies only (for caching)
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        # Build the actual package
+        waydeeper = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+
+            postInstall = ''
+              # Install Python scripts alongside the binary
+              mkdir -p $out/share/waydeeper/scripts
+              cp ${./scripts/inpaint.py} $out/share/waydeeper/scripts/inpaint.py
+              cp ${./scripts/networks.py} $out/share/waydeeper/scripts/networks.py
+
+              wrapProgram $out/bin/waydeeper \
+                --prefix PATH : ${inpaintPythonEnv}/bin \
+                --prefix LD_LIBRARY_PATH : ${
+                  pkgs.lib.makeLibraryPath [
+                    pkgs.wayland
+                    pkgs.libGL
+                    pkgs.libglvnd
+                    pkgs.libxkbcommon
+                    pkgs.onnxruntime
+                  ]
+                } \
+                --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime.so" \
+                --set WAYDEEPER_INPAINT_SCRIPT "$out/share/waydeeper/scripts/inpaint.py"
+            '';
+
+            meta = with pkgs.lib; {
+              description = "GPU-accelerated depth effect wallpaper for Wayland";
+              license = licenses.mit;
+              platforms = platforms.linux;
+              mainProgram = "waydeeper";
+            };
+          }
+        );
       in
       {
         packages = {
@@ -71,36 +139,53 @@
           waydeeper = waydeeper;
         };
 
-        devShells.default = pkgs.mkShell {
+        devShells.default = craneLib.devShell {
+          inputsFrom = [ waydeeper ];
+
           packages = with pkgs; [
-            (python3.withPackages (
-              ps: with ps; [
-                numpy
-                pillow
-                onnxruntime
-                pygobject3
-                pyopengl
-                pyopengl-accelerate
-                setuptools
-                black
-                pytest
-                mypy
-              ]
-            ))
+            rustToolchain
             pkg-config
-            gobject-introspection
-            gtk4
-            gtk4-layer-shell
-            libadwaita
+            cmake
             wayland
             wayland-protocols
+            wayland-scanner
             libGL
-            libepoxy
-            glib
+            libglvnd
+            libxkbcommon
+            openssl
+            onnxruntime
+            # Python for 3D inpainting (optional — only needed when --inpaint is used)
+            inpaintPythonEnv
+            # Dev tools
+            rust-analyzer
+            clippy
+            rustfmt
           ];
 
+          env = {
+            WAYLAND_SCANNER = "${pkgs.wayland}/bin/wayland-scanner";
+            RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+            ORT_DYLIB_PATH = "${pkgs.onnxruntime}/lib/libonnxruntime.so";
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.wayland
+              pkgs.libGL
+              pkgs.libglvnd
+              pkgs.libxkbcommon
+              pkgs.openssl
+              pkgs.onnxruntime
+            ];
+
+          };
+
           shellHook = ''
-            export PYTHONPATH="$PWD:$PYTHONPATH"
+            echo "waydeeper-rust development environment"
+            echo "  rustc: $(rustc --version)"
+            echo "  cargo: $(cargo --version)"
+            echo "  python: $(python3 --version 2>/dev/null || echo 'not found')"
+            # In the dev tree the scripts live in ./scripts/
+            if [ -f "scripts/inpaint.py" ]; then
+              export WAYDEEPER_INPAINT_SCRIPT="$(pwd)/scripts/inpaint.py"
+            fi
           '';
         };
       }
