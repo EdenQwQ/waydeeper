@@ -77,8 +77,10 @@ impl AnimationParams {
             .unwrap_or(config.strength_y);
         let smooth_animation = if self.no_smooth_animation {
             false
+        } else if self.smooth_animation {
+            true
         } else {
-            self.smooth_animation || config.smooth_animation
+            config.smooth_animation
         };
 
         ResolvedAnimationParams {
@@ -86,7 +88,7 @@ impl AnimationParams {
             strength_y,
             smooth_animation,
             animation_speed: self.animation_speed.unwrap_or(config.animation_speed),
-            fps: self.fps.unwrap_or_default().value(),
+            fps: self.fps.map(|f| f.value()).unwrap_or(config.fps),
             active_delay: self.active_delay.unwrap_or(config.active_delay_ms),
             idle_timeout: self.idle_timeout.unwrap_or(config.idle_timeout_ms),
         }
@@ -131,8 +133,8 @@ enum Commands {
         /// Target monitor name (e.g., eDP-1, HDMI-A-1)
         #[arg(short, long, default_value = "0")]
         monitor: String,
-        /// Enable smooth easing animation (default: true)
-        #[arg(long, default_value_t = true)]
+        /// Enable smooth easing animation
+        #[arg(long)]
         smooth_animation: bool,
         /// Disable smooth easing animation
         #[arg(long)]
@@ -158,9 +160,15 @@ enum Commands {
         /// Invert depth interpretation (near ↔ far)
         #[arg(long)]
         invert_depth: bool,
+        /// Disable depth inversion
+        #[arg(long)]
+        no_invert_depth: bool,
         /// Enable 3D inpainting for true parallax with occlusion. Requires 'waydeeper download-model inpaint'
         #[arg(long)]
         inpaint: bool,
+        /// Disable 3D inpainting mode
+        #[arg(long)]
+        no_inpaint: bool,
         /// Enable verbose logging
         #[arg(short, long)]
         verbose: bool,
@@ -179,8 +187,8 @@ enum Commands {
         /// Target monitor name, or omit to start all configured monitors
         #[arg(short, long)]
         monitor: Option<String>,
-        /// Enable smooth easing animation (default: true)
-        #[arg(long, default_value_t = true)]
+        /// Enable smooth easing animation
+        #[arg(long)]
         smooth_animation: bool,
         /// Disable smooth easing animation
         #[arg(long)]
@@ -206,9 +214,15 @@ enum Commands {
         /// Invert depth interpretation (near ↔ far)
         #[arg(long)]
         invert_depth: bool,
+        /// Disable depth inversion
+        #[arg(long)]
+        no_invert_depth: bool,
         /// Enable 3D inpainting mode
         #[arg(long)]
         inpaint: bool,
+        /// Disable 3D inpainting mode
+        #[arg(long)]
+        no_inpaint: bool,
         /// Enable verbose logging
         #[arg(short, long)]
         verbose: bool,
@@ -238,6 +252,9 @@ enum Commands {
         /// Also pre-generate the 3D inpaint mesh
         #[arg(long)]
         inpaint: bool,
+        /// Invert depth for inpaint mesh generation
+        #[arg(long)]
+        invert_depth: bool,
     },
 
     Cache {
@@ -323,7 +340,9 @@ fn handle_command(command: Commands) -> Result<()> {
             model,
             regenerate,
             invert_depth,
+            no_invert_depth,
             inpaint,
+            no_inpaint,
             verbose,
         } => cmd_set(
             &image,
@@ -342,7 +361,9 @@ fn handle_command(command: Commands) -> Result<()> {
             model.as_deref(),
             regenerate,
             invert_depth,
+            no_invert_depth,
             inpaint,
+            no_inpaint,
             verbose,
         ),
 
@@ -360,7 +381,9 @@ fn handle_command(command: Commands) -> Result<()> {
             model,
             regenerate,
             invert_depth,
+            no_invert_depth,
             inpaint,
+            no_inpaint,
             verbose,
         } => cmd_daemon(
             AnimationParams {
@@ -378,7 +401,9 @@ fn handle_command(command: Commands) -> Result<()> {
             model.as_deref(),
             regenerate,
             invert_depth,
+            no_invert_depth,
             inpaint,
+            no_inpaint,
             verbose,
         ),
 
@@ -391,7 +416,8 @@ fn handle_command(command: Commands) -> Result<()> {
             model,
             regenerate,
             inpaint,
-        } => cmd_pregenerate(&image, verbose, model.as_deref(), regenerate, inpaint),
+            invert_depth,
+        } => cmd_pregenerate(&image, verbose, model.as_deref(), regenerate, inpaint, invert_depth),
 
         Commands::Cache { clear, list } => handle_cache_command(clear, list),
         Commands::DownloadModel { model } => cmd_download_model(model.as_deref()),
@@ -479,7 +505,9 @@ fn spawn_daemon(
     if regenerate       { command.arg("--regenerate"); }
     if invert_depth     { command.arg("--invert-depth"); }
     if use_inpaint      { command.arg("--inpaint"); }
-    if !params.smooth_animation {
+    if params.smooth_animation {
+        command.arg("--smooth-animation");
+    } else {
         command.arg("--no-smooth-animation");
     }
 
@@ -565,7 +593,9 @@ fn cmd_set(
     model: Option<&str>,
     regenerate: bool,
     invert_depth: bool,
+    no_invert_depth: bool,
     use_inpaint: bool,
+    no_inpaint: bool,
     verbose: bool,
 ) -> Result<()> {
     let image_path = std::fs::canonicalize(image)
@@ -614,9 +644,8 @@ fn cmd_set(
             monitor_config.strength_x = strength;
             monitor_config.strength_y = strength;
         } else {
-            let default_strength = 0.02;
-            monitor_config.strength_x = animation_params.strength_x.unwrap_or(default_strength);
-            monitor_config.strength_y = animation_params.strength_y.unwrap_or(default_strength);
+            if let Some(sx) = animation_params.strength_x { monitor_config.strength_x = sx; }
+            if let Some(sy) = animation_params.strength_y { monitor_config.strength_y = sy; }
         }
 
         if animation_params.smooth_animation      { monitor_config.smooth_animation = true; }
@@ -627,8 +656,9 @@ fn cmd_set(
         if let Some(idle)  = animation_params.idle_timeout     { monitor_config.idle_timeout_ms = idle; }
         if let Some(ref path) = model_path                     { monitor_config.model_path = Some(path.clone()); }
         if invert_depth                                         { monitor_config.invert_depth = true; }
-
-        monitor_config.use_inpaint = use_inpaint;
+        if no_invert_depth                                      { monitor_config.invert_depth = false; }
+        if use_inpaint                                          { monitor_config.use_inpaint = true; }
+        if no_inpaint                                           { monitor_config.use_inpaint = false; }
 
         config::save_config(&config)?;
     }
@@ -639,16 +669,20 @@ fn cmd_set(
     let monitor_config = config.monitors.get(monitor).cloned().unwrap_or_default();
     let resolved_params = animation_params.resolve(&monitor_config);
 
+    let effective_model = model_path
+        .as_deref()
+        .or(monitor_config.model_path.as_deref());
+
     println!("Starting wallpaper daemon for monitor {}...", monitor);
 
     let mut child = spawn_daemon(
         &image_path_string,
         monitor,
         &resolved_params,
-        model_path.as_deref(),
+        effective_model,
         regenerate,
-        invert_depth,
-        use_inpaint,
+        monitor_config.invert_depth,
+        monitor_config.use_inpaint,
         &monitor_config.inpaint_python,
         verbose,
     )?;
@@ -672,7 +706,9 @@ fn cmd_daemon(
     model: Option<&str>,
     regenerate: bool,
     invert_depth: bool,
+    no_invert_depth: bool,
     use_inpaint: bool,
+    no_inpaint: bool,
     verbose: bool,
 ) -> Result<()> {
     let config = config::load_config()?;
@@ -733,8 +769,20 @@ fn cmd_daemon(
         stop_existing_daemon(monitor_id, verbose);
 
         let resolved_params = animation_params.resolve(monitor_config);
-        let effective_invert = invert_depth || monitor_config.invert_depth;
-        let effective_inpaint = use_inpaint || monitor_config.use_inpaint;
+        let effective_invert = if no_invert_depth {
+            false
+        } else if invert_depth {
+            true
+        } else {
+            monitor_config.invert_depth
+        };
+        let effective_inpaint = if no_inpaint {
+            false
+        } else if use_inpaint {
+            true
+        } else {
+            monitor_config.use_inpaint
+        };
         let effective_model = model_path
             .clone()
             .or_else(|| monitor_config.model_path.clone());
@@ -905,6 +953,7 @@ fn cmd_pregenerate(
     model: Option<&str>,
     regenerate: bool,
     use_inpaint: bool,
+    invert_depth: bool,
 ) -> Result<()> {
     let image_path = std::fs::canonicalize(image)
         .map_err(|_| anyhow!("Image not found: {}", image))?;
@@ -945,6 +994,7 @@ fn cmd_pregenerate(
             &depth_path,
             "python3",
             regenerate,
+            invert_depth,
         ) {
             Ok(ply) => println!("Inpaint mesh ready: {}", ply),
             Err(e)  => {

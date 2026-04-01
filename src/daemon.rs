@@ -124,6 +124,7 @@ impl DepthWallpaperDaemon {
         depth_path: &str,
         python: &str,
         force_regenerate: bool,
+        invert_depth: bool,
     ) -> Result<String> {
         if !models::inpaint_models_present() {
             return Err(anyhow!(
@@ -149,6 +150,7 @@ impl DepthWallpaperDaemon {
             background_thickness: 70,
             context_thickness: 140,
             extrapolation_thickness: 60,
+            invert_depth,
         };
         let tag = inpaint_cfg.cache_tag();
 
@@ -173,6 +175,7 @@ impl DepthWallpaperDaemon {
             background_thickness: 70,
             context_thickness: 140,
             extrapolation_thickness: 60,
+            invert_depth,
         };
 
         println!("Running 3D inpainting...");
@@ -304,6 +307,7 @@ impl DepthWallpaperDaemon {
                 &depth_path,
                 inpaint_python,
                 regenerate,
+                invert_depth,
             ) {
                 Ok(path) => {
                     log::info!("Inpaint mesh ready: {}", path);

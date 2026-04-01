@@ -55,6 +55,8 @@ def parse_args():
     p.add_argument("--sparse-iter",             type=int,   default=5)
     p.add_argument("--ext-edge-threshold",      type=float, default=0.002)
     p.add_argument("--largest-size",            type=int,   default=512)
+    p.add_argument("--invert-depth", action="store_true",
+                   help="Do not invert depth map (swap near/far in mesh)")
     return p.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -546,10 +548,13 @@ def main():
     print(f"Loading depth map: {args.depth}", flush=True)
     depth_pil = Image.open(args.depth)
     depth_arr = np.array(depth_pil, dtype=np.float32)
-    # Depth PNG: 1=near, 0=far.  Normalise to [0,1] then invert → 0=near, 1=far.
+    # Depth PNG: 1=near, 0=far.  Normalise to [0,1].
     if depth_arr.max() > 1.0:
         depth_arr /= depth_arr.max()
-    depth_arr = 1.0 - depth_arr
+    # Default: invert so low depth value = near (mesh z=-1), high = far (z=-5).
+    # With --invert-depth: skip inversion, so high depth = near (z=-5), low = far (z=-1).
+    if not args.invert_depth:
+        depth_arr = 1.0 - depth_arr
     # Power-curve remap: depth = 5^normalised  →  [1.0, 5.0], ratio exactly 5×.
     # Near pixels (normalised≈0) → depth≈1.0  (z≈−1 in OpenGL space)
     # Far  pixels (normalised≈1) → depth≈5.0  (z≈−5 in OpenGL space)

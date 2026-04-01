@@ -25,6 +25,8 @@ pub struct InpaintConfig<'a> {
     pub context_thickness: u32,
     /// Border extrapolation thickness in pixels.
     pub extrapolation_thickness: u32,
+    /// Invert depth map before mesh generation.
+    pub invert_depth: bool,
 }
 
 impl<'a> InpaintConfig<'a> {
@@ -32,12 +34,13 @@ impl<'a> InpaintConfig<'a> {
     /// of the cache key.
     pub fn cache_tag(&self) -> String {
         format!(
-            "v1_ls{}_dt{:.4}_bt{}_ct{}_et{}",
+            "v1_ls{}_dt{:.4}_bt{}_ct{}_et{}_inv{}",
             self.longer_side,
             self.depth_threshold,
             self.background_thickness,
             self.context_thickness,
             self.extrapolation_thickness,
+            if self.invert_depth { 1 } else { 0 },
         )
     }
 }
@@ -146,6 +149,10 @@ pub fn run_inpainting(cfg: &InpaintConfig) -> Result<()> {
         .arg(cfg.context_thickness.to_string())
         .arg("--extrapolation-thickness")
         .arg(cfg.extrapolation_thickness.to_string());
+
+    if cfg.invert_depth {
+        cmd.arg("--invert-depth");
+    }
 
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
