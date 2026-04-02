@@ -288,7 +288,7 @@ fn postprocess_output(output: &[f32], output_size: (usize, usize), target_size: 
         image::imageops::FilterType::Lanczos3,
     );
 
-    let blurred = apply_gaussian_blur(&resized, 2);
+    let blurred = apply_gaussian_blur(&resized, 1);
 
     Ok(blurred.pixels().map(|pixel| pixel.0[0] as f32 / 255.0).collect())
 }

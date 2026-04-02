@@ -573,6 +573,11 @@ impl EglRenderer {
                 gl.get_uniform_location(program, "invert_depth").as_ref(),
                 if self.config.invert_depth { 1 } else { 0 },
             );
+            // No mesh parallax in flat-only mode
+            gl.uniform_2_f32(
+                gl.get_uniform_location(program, "mesh_parallax_travel").as_ref(),
+                0.0, 0.0,
+            );
 
             gl.bind_vertex_array(self.flat_vao);
             gl.draw_elements(glow::TRIANGLES, 6, glow::UNSIGNED_INT, 0);
@@ -655,10 +660,10 @@ impl EglRenderer {
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
 
-            // --- Pass 1: flat background quad (no parallax, fills the whole screen) ---
+            // --- Pass 1: flat background quad (fills the whole screen behind mesh) ---
             // Drawn with depth test disabled and depth writes disabled so it sits
-            // behind everything.  Any hole left by back-face culling in the mesh
-            // shows the static image instead of black.
+            // behind everything.  Any hole left by the mesh shows this background.
+            // Uses the same parallax as the mesh pass so the transition is smooth.
             if let (Some(flat_prog), Some(flat_vao), Some(wt), Some(dt)) = (
                 self.flat_shader,
                 self.flat_vao,
@@ -676,8 +681,9 @@ impl EglRenderer {
                 gl.bind_texture(glow::TEXTURE_2D, Some(dt));
                 gl.uniform_1_i32(gl.get_uniform_location(flat_prog, "depth_texture").as_ref(), 1);
 
-                // No parallax for the background: mouse at centre, strength 0
-                gl.uniform_2_f32(gl.get_uniform_location(flat_prog, "mouse_position").as_ref(), 0.5, 0.5);
+                // Use actual mouse position so the flat background shifts with parallax
+                gl.uniform_2_f32(gl.get_uniform_location(flat_prog, "mouse_position").as_ref(),
+                    self.mouse.current_x as f32, self.mouse.current_y as f32);
                 gl.uniform_2_f32(gl.get_uniform_location(flat_prog, "screen_resolution").as_ref(),
                     self.screen_width as f32, self.screen_height as f32);
                 gl.uniform_2_f32(gl.get_uniform_location(flat_prog, "parallax_strength").as_ref(), 0.0, 0.0);
@@ -686,6 +692,9 @@ impl EglRenderer {
                     self.image_width as f32, self.image_height as f32);
                 gl.uniform_1_i32(gl.get_uniform_location(flat_prog, "invert_depth").as_ref(),
                     if self.config.invert_depth { 1 } else { 0 });
+                // Pass mesh parallax travel so the flat background matches the mesh movement
+                gl.uniform_2_f32(gl.get_uniform_location(flat_prog, "mesh_parallax_travel").as_ref(),
+                    travel_x, travel_y);
 
                 gl.bind_vertex_array(Some(flat_vao));
                 gl.draw_elements(glow::TRIANGLES, 6, glow::UNSIGNED_INT, 0);
@@ -821,18 +830,29 @@ uniform vec2 parallax_strength;
 uniform float zoom_level;
 uniform vec2 image_dimensions;
 uniform bool invert_depth;
+uniform vec2 mesh_parallax_travel;
 
 void main() {
     float depth = texture(depth_texture, fragment_uv).r;
     if (invert_depth) depth = 1.0 - depth;
     
-    // Parallax effect: depth texture has 0=near, 1=far (from depth_estimator.rs inversion).
-    // Near objects (depth=0) should follow mouse MORE than far objects (depth=1).
-    // Use (1.0 - depth) to get parallax amount: near=1.0, far=0.0.
-    float parallax_amount = 1.0 - depth;
-
+    // Parallax offset: use mesh-consistent parallax when in mesh mode
+    // (mesh_parallax_travel > 0), otherwise use the flat-mode strength formula.
     vec2 mouse_offset = mouse_position - vec2(0.5);
-    vec2 parallax_offset = mouse_offset * parallax_amount * parallax_strength;
+    vec2 parallax_offset;
+    if (mesh_parallax_travel.x > 0.0 || mesh_parallax_travel.y > 0.0) {
+        // Mesh mode: camera translates by -(mouse - 0.5) * 2 * travel.
+        // This makes the scene FOLLOW the mouse (objects move right when mouse
+        // is right). To match, the texture UV must shift positively:
+        //   sample_coord += mouse_offset * 2 * travel  (follows cursor)
+        // The NEGATION is needed because camera translation is opposite to
+        // the visual texture shift direction.
+        parallax_offset = -mouse_offset * 2.0 * mesh_parallax_travel;
+    } else {
+        // Flat mode: original depth-based parallax
+        float parallax_amount = 1.0 - depth;
+        parallax_offset = mouse_offset * parallax_amount * parallax_strength;
+    }
 
     float screen_aspect = screen_resolution.x / screen_resolution.y;
     float image_aspect  = image_dimensions.x / image_dimensions.y;
@@ -881,15 +901,7 @@ out vec4 out_color;
 uniform sampler2D wallpaper_texture;
 uniform int use_texture;
 void main() {
-    // Discard stretched triangles using depth gradient.
-    // Use a more aggressive threshold (0.08 instead of 0.15) to catch
-    // boundary distortions earlier. This prevents the "fish-net" stretched
-    // lines that appear at extreme cursor positions.
-    float dz = abs(dFdx(v_world_z)) + abs(dFdy(v_world_z));
-    if (dz > 0.08) discard;
-    
     if (use_texture == 1) {
-        // Discard fragments outside texture bounds
         if (v_uv.x < 0.0 || v_uv.x > 1.0 || v_uv.y < 0.0 || v_uv.y > 1.0)
             discard;
         out_color = vec4(texture(wallpaper_texture, v_uv).rgb, 1.0);

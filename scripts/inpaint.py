@@ -109,10 +109,33 @@ def compute_disparity(depth):
     return 1.0 / (depth + 1e-8)
 
 def find_depth_edges(depth, threshold):
-    """Boolean mask — True where depth changes steeply."""
-    grad_h = np.abs(np.diff(depth, axis=0, append=depth[-1:]))
-    grad_w = np.abs(np.diff(depth, axis=1, append=depth[:, -1:]))
-    return (grad_h > threshold) | (grad_w > threshold)
+    """Boolean mask — True where disparity (1/depth) changes steeply.
+
+    Uses disparity comparison (like 3d-photo-inpainting) instead of raw depth,
+    because disparity is proportional to scene depth difference and properly
+    weights near vs far discontinuities.
+
+    Applies morphological cleanup to smooth saw-like staircase artifacts
+    at diagonal depth boundaries caused by the 4-connected pixel grid.
+    """
+    from scipy.ndimage import binary_opening, binary_closing
+
+    disp = 1.0 / (depth + 1e-8)
+    grad_h = np.abs(np.diff(disp, axis=0, append=disp[-1:]))
+    grad_w = np.abs(np.diff(disp, axis=1, append=disp[:, -1:]))
+    edges = (grad_h > threshold) | (grad_w > threshold)
+
+    # Morphological closing: fills 1-pixel gaps along diagonal boundaries,
+    # turning staircase patterns into smoother continuous edges.
+    struct = np.array([[0, 1, 0],
+                       [1, 1, 1],
+                       [0, 1, 0]], dtype=bool)
+    edges = binary_closing(edges, structure=struct, iterations=1)
+
+    # Morphological opening: removes isolated single-pixel edge noise.
+    edges = binary_opening(edges, structure=struct, iterations=1)
+
+    return edges
 
 # ---------------------------------------------------------------------------
 # LDI mesh (padded canvas of per-pixel depth + color)
@@ -160,6 +183,31 @@ class LDIMesh:
         self._inp_rgb.append(rgb[rows, cols] if hasattr(rgb, '__getitem__') else rgb)
         self._inp_depth.extend(depth.tolist() if hasattr(depth, 'tolist') else depth)
         self._inp_type.extend([layer_type] * len(rows))
+
+    def merge_inpainted(self):
+        """Merge inpainted pixels from internal lists into the padded grid.
+
+        Must be called before build_and_write_ply() so that ML-inpainted
+        content actually appears in the output mesh.  Without this, the
+        inpainting output is silently discarded.
+        """
+        if not self._inp_rows:
+            return
+        pad = self.pad
+        # Concatenate RGB from all inpainting passes
+        if self._inp_rgb:
+            rgb_all = np.concatenate(self._inp_rgb, axis=0)
+        else:
+            rgb_all = np.zeros((0, 3), dtype=np.uint8)
+        for i, (r, c) in enumerate(zip(self._inp_rows, self._inp_cols)):
+            pr, pc = r + pad, c + pad
+            if 0 <= pr < self.pH and 0 <= pc < self.pW:
+                self.pdepth[pr, pc] = self._inp_depth[i]
+                if i < len(rgb_all):
+                    self.prgb[pr, pc] = rgb_all[i]
+                self.pvalid[pr, pc] = True
+                if i < len(self._inp_type):
+                    self.player_type[pr, pc] = self._inp_type[i]
 
     def fov_y_deg(self):
         """Vertical FoV in degrees for the renderer's perspective camera."""
@@ -222,6 +270,10 @@ def find_occlusion_regions(depth, edge_mask, bg_thickness, ctx_thickness):
     """
     Classify depth-edge pixels as near (foreground) or far (background/hole).
     Returns context_map, mask_map, near_map, far_map  (all bool H×W).
+
+    Uses disparity (1/depth) for near/far classification, matching
+    3d-photo-inpainting's tear_edges approach where the pixel with
+    smaller abs(z) (closer to camera) is the near/foreground side.
     """
     from scipy.ndimage import binary_dilation
 
@@ -229,49 +281,75 @@ def find_occlusion_regions(depth, edge_mask, bg_thickness, ctx_thickness):
     near_map = np.zeros((H, W), dtype=bool)
     far_map  = np.zeros((H, W), dtype=bool)
 
-    # Depth convention: smaller value = closer (foreground), larger = farther (background).
-    # At a depth edge, the foreground (near) pixel has SMALLER depth than its neighbour.
-    # Horizontal: compare each pixel with its right neighbour
-    dl = depth[:, :-1]
-    dr = depth[:, 1:]
-    eh = edge_mask[:, :-1] | edge_mask[:, 1:]
-    # Left pixel is foreground (closer) when dl < dr
-    near_map[:, :-1] |= eh & (dl < dr - 1e-3)
-    far_map[:, 1:]   |= eh & (dl < dr - 1e-3)
-    # Right pixel is foreground (closer) when dr < dl
-    near_map[:, 1:]  |= eh & (dr < dl - 1e-3)
-    far_map[:, :-1]  |= eh & (dr < dl - 1e-3)
+    # Use disparity for comparison — disparity is proportional to scene depth
+    # and gives appropriate weight to near vs far discontinuities.
+    disp = 1.0 / (depth + 1e-8)
 
-    # Vertical: compare each pixel with its bottom neighbour
-    dt = depth[:-1, :]
-    db = depth[1:, :]
+    # Horizontal neighbors: classify left vs right
+    dl = disp[:, :-1]
+    dr = disp[:, 1:]
+    depth_l = depth[:, :-1]
+    depth_r = depth[:, 1:]
+    eh = edge_mask[:, :-1] | edge_mask[:, 1:]
+
+    # Near (foreground) = smaller depth = closer to camera = larger disparity
+    left_is_near = eh & (depth_l < depth_r)
+    near_map[:, :-1] |= left_is_near
+    far_map[:, 1:]   |= left_is_near
+    right_is_near = eh & (depth_r < depth_l)
+    near_map[:, 1:]  |= right_is_near
+    far_map[:, :-1]  |= right_is_near
+
+    # Vertical neighbors: classify top vs bottom
+    dt = disp[:-1, :]
+    db = disp[1:, :]
+    depth_t = depth[:-1, :]
+    depth_b = depth[1:, :]
     ev = edge_mask[:-1, :] | edge_mask[1:, :]
-    near_map[:-1, :] |= ev & (dt < db - 1e-3)
-    far_map[1:, :]   |= ev & (dt < db - 1e-3)
-    near_map[1:, :]  |= ev & (db < dt - 1e-3)
-    far_map[:-1, :]  |= ev & (db < dt - 1e-3)
+
+    top_is_near = ev & (depth_t < depth_b)
+    near_map[:-1, :] |= top_is_near
+    far_map[1:, :]   |= top_is_near
+    bottom_is_near = ev & (depth_b < depth_t)
+    near_map[1:, :]  |= bottom_is_near
+    far_map[:-1, :]  |= bottom_is_near
 
     struct = np.ones((3, 3), dtype=bool)
 
-    # Build context (foreground side): dilate near_map outward
+    # Build context (known/good region): dilate the foreground (near) side.
+    # This provides reference pixels for the inpainting networks.
     context_map = binary_dilation(near_map, structure=struct,
                                   iterations=max(1, ctx_thickness // 3))
 
-    # Build the inpaint mask (background hole):
-    # 1. Grow near_map slightly to get a "separator" zone
-    # 2. Dilate far_map outward (into background)
-    # 3. Subtract context to avoid painting over foreground
-    # We give mask a head-start by pushing far_map 3px away from near_map first
-    near_bloated = binary_dilation(near_map, structure=struct, iterations=3)
-    far_seed     = far_map & ~near_bloated  # far pixels not immediately adjacent to fg
+    # Build the inpaint mask (background hole behind foreground objects):
+    # Following 3d-photo-inpainting's approach:
+    # 1. Create a separator by dilating near_map slightly
+    # 2. Remove separator zone from far_map to get far_seed
+    #    (pixels clearly on the background side, not right at the boundary)
+    # 3. Dilate far_seed outward (into background) to fill the hole region
+    # 4. Exclude context to avoid painting over foreground
+    near_sep = binary_dilation(near_map, structure=struct, iterations=2)
+    far_seed = far_map & ~near_sep
     if not far_seed.any():
-        # Fallback: just use far pixels directly if no separation possible
-        far_seed = far_map
-    mask_map = binary_dilation(far_seed, structure=struct,
-                               iterations=max(1, bg_thickness // 3))
-    mask_map &= ~context_map
+        # Fallback: if separator eats all far pixels, use far directly
+        far_seed = far_map.copy()
+    if not far_seed.any():
+        # Last resort: use edge_mask itself as seed (both sides)
+        far_seed = edge_mask.copy()
 
-    print(f"Occlusion: {near_map.sum()} near-edge px, "
+    # Grow mask into the background region
+    dilated_far = binary_dilation(far_seed, structure=struct,
+                                  iterations=max(1, bg_thickness // 3))
+    # Ensure mask doesn't overlap context (foreground)
+    mask_map = dilated_far & ~context_map
+
+    # If mask is still empty but we have edges, create a minimal mask
+    # by growing from edge pixels directly
+    if not mask_map.any() and edge_mask.any():
+        mask_map = binary_dilation(edge_mask, structure=struct, iterations=3)
+        mask_map &= ~context_map
+
+    print(f"Occlusion: {near_map.sum()} near-edge px, {far_map.sum()} far-edge px, "
           f"{mask_map.sum()} hole px ({mask_map.mean()*100:.1f}%)", flush=True)
     return context_map, mask_map, near_map, far_map
 
@@ -421,53 +499,57 @@ def build_and_write_ply(mesh, output_path, depth_threshold=0.04):
 
     valid  = mesh.pvalid & (d > 0)
 
-    # --- Build connectivity graph with depth-aware edge tearing ---
-    print("Building mesh graph with depth-aware edges...", flush=True)
-    
+    # --- Build connectivity graph with disparity-based edge tearing ---
+    # Following 3d-photo-inpainting's approach: tear edges where the disparity
+    # (1/depth) difference exceeds a threshold. Disparity properly weights
+    # near vs far depth discontinuities — a 0.1m jump at 1m is much more
+    # significant than at 50m, and disparity captures this.
+    print("Building mesh graph with disparity-based edges...", flush=True)
+
+    # Compute disparity for edge tearing decisions
+    disp = 1.0 / (d + 1e-8)
+
     # Each pixel is a node: (r, c) → node_id
     node_map = np.full((pH, pW), -1, dtype=np.int32)
     valid_rc = np.argwhere(valid)
     n_nodes = len(valid_rc)
     for i, (r, c) in enumerate(valid_rc):
         node_map[r, c] = i
-    
-    # Build edge list: connect 4-neighbors if depth difference < threshold
-    # Use DEPTH (not disparity) for simpler threshold tuning.
-    # The original 3d-photo-inpainting uses disparity, but for images with
-    # depth range [1.0, 5.0], a depth threshold of 0.2-0.3 works well
-    # (equivalent to ~0.04 disparity threshold near depth=2.5).
+
+    # Edge tearing disabled — all pixels stay connected.
+    # No holes, no abrupt disappearing of pixels.
+    disp_threshold = float('inf')
+
     edges = []
-    depth_diffs = []  # Track edge depth differences for diagnostics
-    
+    disp_diffs = []
+
     for r, c in valid_rc:
         node_id = node_map[r, c]
-        d_cur = d[r, c]
-        
+        dp_cur = disp[r, c]
+
         # Right neighbor
         if c + 1 < pW and node_map[r, c + 1] >= 0:
-            d_nb = d[r, c + 1]
-            diff = abs(d_cur - d_nb)
-            depth_diffs.append(diff)
-            # Use a more permissive threshold: 0.3 instead of strict 0.04 disparity
-            # (0.04 disparity ≈ 0.1 depth at depth=2.5, 0.25 at depth=5.0)
-            if diff < 0.5:  # Allow connections unless depth jumps >0.5 units
+            dp_nb = disp[r, c + 1]
+            diff = abs(dp_cur - dp_nb)
+            disp_diffs.append(diff)
+            if diff < disp_threshold:
                 edges.append((node_id, node_map[r, c + 1]))
-        
+
         # Down neighbor
         if r + 1 < pH and node_map[r + 1, c] >= 0:
-            d_nb = d[r + 1, c]
-            diff = abs(d_cur - d_nb)
-            depth_diffs.append(diff)
-            if diff < 0.5:
+            dp_nb = disp[r + 1, c]
+            diff = abs(dp_cur - dp_nb)
+            disp_diffs.append(diff)
+            if diff < disp_threshold:
                 edges.append((node_id, node_map[r + 1, c]))
     
-    if depth_diffs:
-        depth_diffs = np.array(depth_diffs)
+    if disp_diffs:
+        disp_diffs_arr = np.array(disp_diffs)
         print(f"Initial graph: {n_nodes} nodes, {len(edges)} edges", flush=True)
-        print(f"Depth diff stats: min={depth_diffs.min():.4f}, "
-              f"median={np.median(depth_diffs):.4f}, "
-              f"95th={np.percentile(depth_diffs, 95):.4f}, "
-              f"max={depth_diffs.max():.4f}", flush=True)
+        print(f"Disparity diff stats: min={disp_diffs_arr.min():.4f}, "
+              f"median={np.median(disp_diffs_arr):.4f}, "
+              f"95th={np.percentile(disp_diffs_arr, 95):.4f}, "
+              f"max={disp_diffs_arr.max():.4f} (threshold={disp_threshold})", flush=True)
     
     # Build adjacency list
     adjacency = [set() for _ in range(n_nodes)]
@@ -812,6 +894,10 @@ def main():
         print("No occlusion regions found, writing flat mesh.", flush=True)
 
     # ---- Write PLY ----
+    # Merge inpainted pixels into the grid before building the mesh.
+    # Without this, the ML inpainting output is stored in internal lists
+    # but never appears in the PLY output.
+    ldi.merge_inpainted()
     print(f"Writing PLY to {args.output}...", flush=True)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     build_and_write_ply(ldi, args.output, depth_threshold=args.depth_threshold)
