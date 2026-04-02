@@ -1,4 +1,4 @@
-# AGENTS.md - waydeeper-rust
+# AGENTS.md - waydeeper
 
 ## What This Is
 
@@ -133,7 +133,7 @@ scripts/
 ## Build & Run
 
 ```bash
-cd /home/eden/Repos/waydeeper-rust
+cd /home/eden/Repos/waydeeper
 nix develop          # Enter dev shell with all deps
 cargo check          # Verify compilation
 nix build            # Build nix package
@@ -167,7 +167,7 @@ Python at `../waydeeper/` uses GTK4 + Gtk4LayerShell + GtkGLArea. Key files for 
 ## Relevant Files
 
 ```
-waydeeper-rust/
+waydeeper/
 ├── scripts/
 │   ├── inpaint.py              ← Full Python inpainting pipeline
 │   └── networks.py             ← Neural network architectures (MIT, from 3d-photo-inpainting)

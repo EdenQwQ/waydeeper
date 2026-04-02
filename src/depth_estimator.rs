@@ -72,50 +72,14 @@ impl DepthEstimator {
         let rgb_image = image.to_rgb8();
         let (original_width, original_height) = rgb_image.dimensions();
 
-        let (input_height, input_width) = self.model_input_size;
-        let resized = image::imageops::resize(
-            &rgb_image,
-            input_width as u32,
-            input_height as u32,
-            image::imageops::FilterType::Lanczos3,
-        );
-
-        let mut input_data: Vec<f32> = Vec::with_capacity(3 * input_height * input_width);
-
-        match self.input_layout {
-            InputLayout::ChannelsFirst => {
-                for channel in 0..3 {
-                    for y in 0..input_height {
-                        for x in 0..input_width {
-                            let pixel = resized.get_pixel(x as u32, y as u32);
-                            let value = pixel[channel] as f32 / 255.0;
-                            let normalized = (value - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
-                            input_data.push(normalized);
-                        }
-                    }
-                }
-            }
-            InputLayout::ChannelsLast => {
-                for y in 0..input_height {
-                    for x in 0..input_width {
-                        let pixel = resized.get_pixel(x as u32, y as u32);
-                        for channel in 0..3 {
-                            let value = pixel[channel] as f32 / 255.0;
-                            let normalized = (value - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
-                            input_data.push(normalized);
-                        }
-                    }
-                }
-            }
-        }
-
         let mut session = ort::session::Session::builder()?
             .commit_from_file(&self.model_path)?;
 
         eprintln!("Estimating depth...");
-        let input_infos = session.inputs();
+
+        // Read model input shape to determine layout and input dimensions
         let mut is_5d = false;
-        if let Some(input) = input_infos.first() {
+        if let Some(input) = session.inputs().first() {
             if let ort::value::ValueType::Tensor { shape, .. } = input.dtype() {
                 log::info!("Model input shape: {:?}", shape);
                 let ndim = shape.len();
@@ -156,6 +120,45 @@ impl DepthEstimator {
             }
         }
 
+        // Now resize image using the model's actual input dimensions
+        let (input_height, input_width) = self.model_input_size;
+        log::info!("Resizing input to {}x{}", input_width, input_height);
+        let resized = image::imageops::resize(
+            &rgb_image,
+            input_width as u32,
+            input_height as u32,
+            image::imageops::FilterType::Lanczos3,
+        );
+
+        let mut input_data: Vec<f32> = Vec::with_capacity(3 * input_height * input_width);
+
+        match self.input_layout {
+            InputLayout::ChannelsFirst => {
+                for channel in 0..3 {
+                    for y in 0..input_height {
+                        for x in 0..input_width {
+                            let pixel = resized.get_pixel(x as u32, y as u32);
+                            let value = pixel[channel] as f32 / 255.0;
+                            let normalized = (value - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
+                            input_data.push(normalized);
+                        }
+                    }
+                }
+            }
+            InputLayout::ChannelsLast => {
+                for y in 0..input_height {
+                    for x in 0..input_width {
+                        let pixel = resized.get_pixel(x as u32, y as u32);
+                        for channel in 0..3 {
+                            let value = pixel[channel] as f32 / 255.0;
+                            let normalized = (value - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
+                            input_data.push(normalized);
+                        }
+                    }
+                }
+            }
+        }
+
         let input_tensor = if is_5d {
             // 5D input: [1, 1, C, H, W] — single image as a single view
             let input_array = ndarray::Array5::from_shape_vec(
@@ -165,13 +168,26 @@ impl DepthEstimator {
             .map_err(|error| anyhow!("Failed to create 5D input array: {}", error))?;
             ort::value::Tensor::<f32>::from_array(input_array)?
         } else {
-            // 4D input: [1, C, H, W] or [1, H, W, C]
-            let input_array = ndarray::Array4::from_shape_vec(
-                (1, 3, input_height, input_width),
-                input_data,
-            )
-            .map_err(|error| anyhow!("Failed to create input array: {}", error))?;
-            ort::value::Tensor::<f32>::from_array(input_array)?
+            match self.input_layout {
+                InputLayout::ChannelsFirst => {
+                    // [N, C, H, W]
+                    let input_array = ndarray::Array4::from_shape_vec(
+                        (1, 3, input_height, input_width),
+                        input_data,
+                    )
+                    .map_err(|error| anyhow!("Failed to create input array: {}", error))?;
+                    ort::value::Tensor::<f32>::from_array(input_array)?
+                }
+                InputLayout::ChannelsLast => {
+                    // [N, H, W, C]
+                    let input_array = ndarray::Array4::from_shape_vec(
+                        (1, input_height, input_width, 3),
+                        input_data,
+                    )
+                    .map_err(|error| anyhow!("Failed to create input array: {}", error))?;
+                    ort::value::Tensor::<f32>::from_array(input_array)?
+                }
+            }
         };
 
         let outputs = session.run(ort::inputs![input_tensor])?;
@@ -179,7 +195,12 @@ impl DepthEstimator {
         let output_view: ndarray::ArrayViewD<f32> = outputs[0].try_extract_array()?;
         let output_data: Vec<f32> = output_view.iter().copied().collect();
 
-        let depth = postprocess_output(&output_data, (original_width as usize, original_height as usize));
+        // Depth models output the same spatial dimensions as their input
+        let depth = postprocess_output(
+            &output_data,
+            (input_width, input_height),
+            (original_width as usize, original_height as usize),
+        );
 
         Ok(depth)
     }
@@ -209,7 +230,7 @@ impl DepthEstimator {
     }
 }
 
-fn postprocess_output(output: &[f32], target_size: (usize, usize)) -> Vec<f32> {
+fn postprocess_output(output: &[f32], output_size: (usize, usize), target_size: (usize, usize)) -> Vec<f32> {
     let mut depth = output.to_vec();
 
     let mut sorted = depth.clone();
@@ -225,18 +246,13 @@ fn postprocess_output(output: &[f32], target_size: (usize, usize)) -> Vec<f32> {
         *value = 1.0 - *value;
     }
 
-    let input_width = (depth.len() as f64).sqrt() as u32;
-    let input_height = if input_width * input_width == depth.len() as u32 {
-        input_width
-    } else {
-        return depth;
-    };
+    let (input_width, input_height) = output_size;
     let (target_width, target_height) = (target_size.0 as u32, target_size.1 as u32);
 
     let pixels: Vec<u8> = depth.iter().map(|value| (value * 255.0) as u8).collect();
     let image = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(
-        input_width,
-        input_height,
+        input_width as u32,
+        input_height as u32,
         pixels,
     )
     .expect("failed to create depth image buffer");
