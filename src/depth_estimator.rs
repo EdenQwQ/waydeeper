@@ -88,28 +88,33 @@ impl DepthEstimator {
                     // 4D: [N, C, H, W]  → dim1=3
                     // 4D: [N, H, W, C]  → dim3=3
                     // 5D: [N, V, C, H, W]  → dim2=3  (e.g. depth-anything-v3)
+                    // Shape values of -1 indicate dynamic dimensions
+                    let shape_positive = |i: usize| -> Option<i64> {
+                        shape.get(i).copied().filter(|&v| v > 0)
+                    };
+                    
                     for i in 0..ndim {
                         if shape.get(i).copied().unwrap_or(0) == 3 {
                             if i == 1 && ndim == 4 {
                                 // [N, C, H, W]
                                 self.input_layout = InputLayout::ChannelsFirst;
                                 self.model_input_size = (
-                                    shape.get(2).copied().unwrap_or(256) as usize,
-                                    shape.get(3).copied().unwrap_or(256) as usize,
+                                    shape_positive(2).unwrap_or(256) as usize,
+                                    shape_positive(3).unwrap_or(256) as usize,
                                 );
                             } else if i == 3 && ndim == 4 {
                                 // [N, H, W, C]
                                 self.input_layout = InputLayout::ChannelsLast;
                                 self.model_input_size = (
-                                    shape.get(1).copied().unwrap_or(256) as usize,
-                                    shape.get(2).copied().unwrap_or(256) as usize,
+                                    shape_positive(1).unwrap_or(256) as usize,
+                                    shape_positive(2).unwrap_or(256) as usize,
                                 );
                             } else if i == 2 && ndim >= 5 {
                                 // [N, V, C, H, W] — 5D with channels at dim 2
                                 self.input_layout = InputLayout::ChannelsFirst;
                                 self.model_input_size = (
-                                    shape.get(ndim - 2).copied().unwrap_or(256) as usize,
-                                    shape.get(ndim - 1).copied().unwrap_or(256) as usize,
+                                    shape_positive(ndim - 2).unwrap_or(256) as usize,
+                                    shape_positive(ndim - 1).unwrap_or(256) as usize,
                                 );
                                 is_5d = true;
                             }
@@ -194,13 +199,23 @@ impl DepthEstimator {
 
         let output_view: ndarray::ArrayViewD<f32> = outputs[0].try_extract_array()?;
         let output_data: Vec<f32> = output_view.iter().copied().collect();
+        
+        // Infer actual output dimensions from the data
+        let output_shape = output_view.shape();
+        log::info!("Model output shape: {:?}", output_shape);
+        
+        // Most depth models output [N, H, W] or [N, C, H, W]
+        // Extract H, W from the last 2 dimensions
+        let output_height = output_shape[output_shape.len() - 2];
+        let output_width = output_shape[output_shape.len() - 1];
+        log::info!("Detected output dimensions: {}x{}", output_width, output_height);
 
-        // Depth models output the same spatial dimensions as their input
+        // Depth models usually output the same spatial dimensions as their input
         let depth = postprocess_output(
             &output_data,
-            (input_width, input_height),
+            (output_width, output_height),
             (original_width as usize, original_height as usize),
-        );
+        )?;
 
         Ok(depth)
     }
@@ -230,7 +245,7 @@ impl DepthEstimator {
     }
 }
 
-fn postprocess_output(output: &[f32], output_size: (usize, usize), target_size: (usize, usize)) -> Vec<f32> {
+fn postprocess_output(output: &[f32], output_size: (usize, usize), target_size: (usize, usize)) -> Result<Vec<f32>> {
     let mut depth = output.to_vec();
 
     let mut sorted = depth.clone();
@@ -250,12 +265,21 @@ fn postprocess_output(output: &[f32], output_size: (usize, usize), target_size: 
     let (target_width, target_height) = (target_size.0 as u32, target_size.1 as u32);
 
     let pixels: Vec<u8> = depth.iter().map(|value| (value * 255.0) as u8).collect();
+    
+    log::debug!(
+        "Creating depth image buffer: {}x{} (expected {} pixels, got {})",
+        input_width, input_height, input_width * input_height, pixels.len()
+    );
+    
     let image = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(
         input_width as u32,
         input_height as u32,
         pixels,
     )
-    .expect("failed to create depth image buffer");
+    .ok_or_else(|| anyhow::anyhow!(
+        "Failed to create depth image buffer: dimensions {}x{} don't match data length {}",
+        input_width, input_height, depth.len()
+    ))?;
 
     let resized = image::imageops::resize(
         &image,
@@ -266,7 +290,7 @@ fn postprocess_output(output: &[f32], output_size: (usize, usize), target_size: 
 
     let blurred = apply_gaussian_blur(&resized, 2);
 
-    blurred.pixels().map(|pixel| pixel.0[0] as f32 / 255.0).collect()
+    Ok(blurred.pixels().map(|pixel| pixel.0[0] as f32 / 255.0).collect())
 }
 
 fn apply_gaussian_blur(
