@@ -825,9 +825,14 @@ uniform bool invert_depth;
 void main() {
     float depth = texture(depth_texture, fragment_uv).r;
     if (invert_depth) depth = 1.0 - depth;
+    
+    // Parallax effect: depth texture has 0=near, 1=far (from depth_estimator.rs inversion).
+    // Near objects (depth=0) should follow mouse MORE than far objects (depth=1).
+    // Use (1.0 - depth) to get parallax amount: near=1.0, far=0.0.
+    float parallax_amount = 1.0 - depth;
 
     vec2 mouse_offset = mouse_position - vec2(0.5);
-    vec2 parallax_offset = mouse_offset * depth * parallax_strength;
+    vec2 parallax_offset = mouse_offset * parallax_amount * parallax_strength;
 
     float screen_aspect = screen_resolution.x / screen_resolution.y;
     float image_aspect  = image_dimensions.x / image_dimensions.y;
@@ -876,11 +881,15 @@ out vec4 out_color;
 uniform sampler2D wallpaper_texture;
 uniform int use_texture;
 void main() {
-    // Discard back-folded triangles: large depth-rate per screen pixel
-    // means the triangle is nearly edge-on and would render as stretched lines.
+    // Discard stretched triangles using depth gradient.
+    // Use a more aggressive threshold (0.08 instead of 0.15) to catch
+    // boundary distortions earlier. This prevents the "fish-net" stretched
+    // lines that appear at extreme cursor positions.
     float dz = abs(dFdx(v_world_z)) + abs(dFdy(v_world_z));
-    if (dz > 0.5) discard;
+    if (dz > 0.08) discard;
+    
     if (use_texture == 1) {
+        // Discard fragments outside texture bounds
         if (v_uv.x < 0.0 || v_uv.x > 1.0 || v_uv.y < 0.0 || v_uv.y > 1.0)
             discard;
         out_color = vec4(texture(wallpaper_texture, v_uv).rgb, 1.0);

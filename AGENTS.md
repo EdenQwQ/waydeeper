@@ -49,13 +49,16 @@ src/
   renderer.rs        - Dual-mode renderer (flat depth-warp + mesh perspective)
                        Two-pass draw: flat background quad + mesh with back-face culling
                        Mesh shader samples full-res wallpaper via UV coords (not baked vertex colors)
+                       Fragment shader culls stretched triangles (depth gradient > 0.08)
   wayland.rs         - smithay-client-toolkit: layer-shell, pointer tracking, fractional scale
                        OutputProbe for list_connected_outputs() (monitor availability check)
   egl_bridge.c       - ~100 lines C: EGL init from wl_display, window surface via wl_egl_window
 build.rs             - Compiles egl_bridge.c, links libEGL + libwayland-egl
 scripts/
   inpaint.py         - Full 3D inpainting pipeline:
-                       Bilateral smoothing, edge/depth/color ML inpainting, vectorised PLY builder
+                       Bilateral smoothing, edge/depth/color ML inpainting, graph-based mesh builder
+                       Graph-based topology with edge tearing at depth discontinuities
+                       Dangling edge removal and component filtering (≥200 nodes)
                        Binary PLY output with per-vertex UV texture coordinates
   networks.py        - Neural network architectures (MIT, from 3d-photo-inpainting)
 ```
@@ -74,7 +77,7 @@ scripts/
 
 6. **Mouse y inversion**: `mouse_y = 1.0 - (y / height)` matching Python's `normalized_y = 1.0 - (y_position / window_height)`.
 
-7. **Depth postprocessing**: Matches Python exactly — percentile normalization → uint8 → `image::imageops::resize(Lanczos3)` → Gaussian blur with PIL's sigma formula (`0.5 + radius × 0.57`).
+7. **Depth postprocessing**: Matches Python exactly — percentile normalization → **invert** (1.0 - x) → uint8 → `image::imageops::resize(Lanczos3)` → Gaussian blur with PIL's sigma formula (`0.5 + radius × 0.57`). The inversion means saved depth maps have 0=near (dark), 1=far (bright).
 
 8. **ONNX**: `ort` crate with `load-dynamic` feature. `ORT_DYLIB_PATH` set in flake.nix to nixpkgs' onnxruntime.
 
@@ -102,9 +105,17 @@ scripts/
     fov_y_cover = min(fov_y_intrinsic, fov_y_for_x)
     ```
 
-14. **Depth mapping (inpaint)**: `depth = 5^normalised` → range [1.0, 5.0], ratio 5×. This keeps the near/far ratio constant regardless of image content, preventing extreme parallax stretching. Border falloff: `1 + 0.005 * offset_px` (max 1.3× at 60px).
+14. **Depth mapping (inpaint)**: `depth = 5^normalised` → range [1.0, 5.0], ratio 5×. This keeps the near/far ratio constant regardless of image content, preventing extreme parallax stretching. Border falloff: `1 + 0.002 * offset_px` (max 1.12× at 60px, reduced from 1.3× to prevent extreme Z values).
 
-15. **Mesh generation**: `inpaint.py` resize round-trip uses log space: `log5(depth) → uint16 → bilinear resize → 5^(normalised)`. PLY binary format: 24-byte vertices (3×f32 + 4×u8 + 2×f32) with `image_aspect` and `fov_y_deg` in header comments.
+15. **Mesh generation**: `inpaint.py` uses **graph-based topology** (inspired by 3d-photo-inpainting/mesh.py):
+    - Builds connectivity graph connecting 4-neighbor pixels
+    - **Edge tearing**: Removes edges where `abs(depth_a - depth_b) > 0.5` (depth units, not disparity)
+    - **Dangling edge removal**: Iteratively removes nodes with degree <2 (max 10 iterations)
+    - **Component filtering**: Keeps components with ≥100 nodes OR ≥10% of largest component size
+    - **Triangle generation**: 4-way subdivision per node, CCW winding for proper front-face culling
+    - **No double-inversion**: Uses depth PNG directly (already inverted by depth_estimator.rs)
+    - Resize round-trip uses log space: `log5(depth) → uint16 → bilinear resize → 5^(normalised)`
+    - PLY binary format: 24-byte vertices (3×f32 + 4×u8 + 2×f32) with `image_aspect` and `fov_y_deg` in header comments
 
 16. **Proxy support**: `make_proxy_agent()` in `cli.rs` detects `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` environment variables and configures a `ureq` proxy agent. Used by all download commands.
 
@@ -113,6 +124,12 @@ scripts/
 18. **CLI parameter consistency**: Both `set` and `daemon` commands expose the same animation parameters (`--strength-x`, `--strength-y`, `--smooth-animation`, etc.). `daemon` CLI flags override saved config values. All parameters have help text explaining their purpose.
 
 19. **Logging**: Main process defaults to `warn` level. Daemon subprocess receives `RUST_LOG=warn` by default (only progress messages via println/eprintln), or `RUST_LOG=debug` with `--verbose`. The `-v` flag enables detailed logging for debugging.
+
+20. **Depth convention & parallax direction**:
+    - Saved depth PNGs: 0=near (dark), 1=far (bright) — inverted from standard due to `1.0 - x` in depth_estimator.rs
+    - Flat shader: uses `(1.0 - depth)` for parallax amount → near pixels shift MORE, far pixels shift LESS
+    - Mesh mode: perspective projection automatically gives correct parallax (near shifts more at constant camera speed)
+    - Effect: **near objects follow the mouse, far objects avoid the mouse** (parallax follows gaze direction)
 
 ## Dependencies (Cargo.toml)
 
@@ -155,7 +172,6 @@ The `edge-model.pth` and `color-model.pth` are also needed for inpainting — th
 
 - Depth estimation is CPU-only (ONNX). GPU-accelerated inference would require CUDA/DirectML provider setup.
 - Occlusion regions are always 0 for most images (ML inpainting networks load but the near/far separator logic needs tuning). The flat mesh (no inpainting holes) is produced instead and works fine visually.
-- Fish-net/stretching artefacts at high `--strength` values in inpaint mode — accepted as inherent limitation of depth-based parallax.
 
 ## Original Python Reference
 

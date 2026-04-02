@@ -230,6 +230,9 @@ Uses ML inpainting to synthesise background behind foreground objects, producing
 true parallax with correct occlusion. First run generates a 3D mesh from your image;
 subsequent runs use the cached mesh.
 
+The mesh generator uses graph-based topology (from 3d-photo-inpainting) with
+depth-aware edge tearing to prevent stretching artifacts at depth discontinuities.
+
 ```bash
 # Enable 3D inpainting
 waydeeper set /path/to/wallpaper.jpg --inpaint
@@ -351,7 +354,8 @@ src/
   wayland.rs         - smithay-client-toolkit layer-shell + fractional scaling
   egl_bridge.c       - C FFI for EGL/Wayland bridge
 scripts/
-  inpaint.py         - 3D inpainting pipeline (edge/depth/color ML networks)
+  inpaint.py         - 3D inpainting pipeline with graph-based mesh generation
+                       Edge tearing at depth discontinuities, dangling edge removal
   networks.py        - Neural network architectures (from 3d-photo-inpainting)
 ```
 

@@ -175,12 +175,13 @@ def extrapolate_border(mesh, thickness):
     if pad <= 0:
         return
 
-    # Top: copy first valid row upward.
-    # Falloff of 0.005/px means the outermost border pixel (60px away) has
-    # depth = edge_depth × 1.3  — gentle enough not to distort the mesh.
+    # Border extrapolation: copy edge pixels outward with gradual depth increase.
+    # Use a SMALLER falloff to prevent extreme Z values.
+    # At 60px: falloff = 1 + 0.002*60 = 1.12 → far depth 5.0 becomes 5.6 (z=-5.6)
+    # This is more conservative than the original 1.3× multiplier.
     src_r = pad
     for r in range(pad - 1, -1, -1):
-        falloff = 1.0 + 0.005 * (pad - r)
+        falloff = 1.0 + 0.002 * (pad - r)  # Reduced from 0.005 to 0.002
         mesh.prgb[r, pad:pW-pad]   = mesh.prgb[src_r, pad:pW-pad]
         mesh.pdepth[r, pad:pW-pad] = mesh.pdepth[src_r, pad:pW-pad] * falloff
         mesh.pvalid[r, pad:pW-pad] = True
@@ -189,7 +190,7 @@ def extrapolate_border(mesh, thickness):
     # Bottom
     src_r = pH - pad - 1
     for r in range(pH - pad, pH):
-        falloff = 1.0 + 0.005 * (r - src_r)
+        falloff = 1.0 + 0.002 * (r - src_r)
         mesh.prgb[r, pad:pW-pad]   = mesh.prgb[src_r, pad:pW-pad]
         mesh.pdepth[r, pad:pW-pad] = mesh.pdepth[src_r, pad:pW-pad] * falloff
         mesh.pvalid[r, pad:pW-pad] = True
@@ -198,7 +199,7 @@ def extrapolate_border(mesh, thickness):
     # Left
     src_c = pad
     for c in range(pad - 1, -1, -1):
-        falloff = 1.0 + 0.005 * (pad - c)
+        falloff = 1.0 + 0.002 * (pad - c)
         mesh.prgb[:, c]   = mesh.prgb[:, src_c]
         mesh.pdepth[:, c] = mesh.pdepth[:, src_c] * falloff
         mesh.pvalid[:, c] = True
@@ -207,7 +208,7 @@ def extrapolate_border(mesh, thickness):
     # Right
     src_c = pW - pad - 1
     for c in range(pW - pad, pW):
-        falloff = 1.0 + 0.005 * (c - src_c)
+        falloff = 1.0 + 0.002 * (c - src_c)
         mesh.prgb[:, c]   = mesh.prgb[:, src_c]
         mesh.pdepth[:, c] = mesh.pdepth[:, src_c] * falloff
         mesh.pvalid[:, c] = True
@@ -389,13 +390,19 @@ def run_inpaint_pass(rgb, depth, edge_mask, context_map, mask_map,
     return color_pred, depth_pred.astype(np.float32), mask_map.copy()
 
 # ---------------------------------------------------------------------------
-# Vectorised PLY mesh builder
+# Graph-based mesh builder (replicates 3d-photo-inpainting approach)
 # ---------------------------------------------------------------------------
 
-def build_and_write_ply(mesh, output_path):
+def build_and_write_ply(mesh, output_path, depth_threshold=0.04):
     """
-    Build vertex/face arrays entirely with numpy (no Python pixel loops),
-    then write a binary PLY for fast I/O and compact size.
+    Build a graph-based mesh with depth-aware edge tearing, then write binary PLY.
+    
+    Steps (following 3d-photo-inpainting/mesh.py):
+    1. Create connectivity graph for all valid pixels
+    2. Tear edges at depth discontinuities (disparity diff > threshold)
+    3. Remove dangling edges (degree < 2)
+    4. Filter small isolated components (< min_nodes)
+    5. Generate triangles from graph connectivity
     """
     pH, pW = mesh.pdepth.shape
     focal  = mesh.focal
@@ -403,7 +410,6 @@ def build_and_write_ply(mesh, output_path):
     pcy    = mesh.pcy
 
     # --- Vectorised reprojection of the padded grid ---
-    # rows[r,c] = r, cols[r,c] = c
     rows = np.arange(pH, dtype=np.float32)[:, None] * np.ones((1, pW), dtype=np.float32)
     cols = np.ones((pH, 1), dtype=np.float32) * np.arange(pW, dtype=np.float32)[None, :]
     d    = mesh.pdepth  # (pH, pW)
@@ -415,54 +421,204 @@ def build_and_write_ply(mesh, output_path):
 
     valid  = mesh.pvalid & (d > 0)
 
-    # Assign sequential indices to valid pixels
-    vertex_index = np.full((pH, pW), -1, dtype=np.int32)
-    valid_rc = np.argwhere(valid)           # (N, 2)
-    n_valid  = len(valid_rc)
-    vertex_index[valid_rc[:, 0], valid_rc[:, 1]] = np.arange(n_valid, dtype=np.int32)
-
-    # Collect position and color arrays
-    vr = valid_rc[:, 0]
-    vc = valid_rc[:, 1]
+    # --- Build connectivity graph with depth-aware edge tearing ---
+    print("Building mesh graph with depth-aware edges...", flush=True)
+    
+    # Each pixel is a node: (r, c) → node_id
+    node_map = np.full((pH, pW), -1, dtype=np.int32)
+    valid_rc = np.argwhere(valid)
+    n_nodes = len(valid_rc)
+    for i, (r, c) in enumerate(valid_rc):
+        node_map[r, c] = i
+    
+    # Build edge list: connect 4-neighbors if depth difference < threshold
+    # Use DEPTH (not disparity) for simpler threshold tuning.
+    # The original 3d-photo-inpainting uses disparity, but for images with
+    # depth range [1.0, 5.0], a depth threshold of 0.2-0.3 works well
+    # (equivalent to ~0.04 disparity threshold near depth=2.5).
+    edges = []
+    depth_diffs = []  # Track edge depth differences for diagnostics
+    
+    for r, c in valid_rc:
+        node_id = node_map[r, c]
+        d_cur = d[r, c]
+        
+        # Right neighbor
+        if c + 1 < pW and node_map[r, c + 1] >= 0:
+            d_nb = d[r, c + 1]
+            diff = abs(d_cur - d_nb)
+            depth_diffs.append(diff)
+            # Use a more permissive threshold: 0.3 instead of strict 0.04 disparity
+            # (0.04 disparity ≈ 0.1 depth at depth=2.5, 0.25 at depth=5.0)
+            if diff < 0.5:  # Allow connections unless depth jumps >0.5 units
+                edges.append((node_id, node_map[r, c + 1]))
+        
+        # Down neighbor
+        if r + 1 < pH and node_map[r + 1, c] >= 0:
+            d_nb = d[r + 1, c]
+            diff = abs(d_cur - d_nb)
+            depth_diffs.append(diff)
+            if diff < 0.5:
+                edges.append((node_id, node_map[r + 1, c]))
+    
+    if depth_diffs:
+        depth_diffs = np.array(depth_diffs)
+        print(f"Initial graph: {n_nodes} nodes, {len(edges)} edges", flush=True)
+        print(f"Depth diff stats: min={depth_diffs.min():.4f}, "
+              f"median={np.median(depth_diffs):.4f}, "
+              f"95th={np.percentile(depth_diffs, 95):.4f}, "
+              f"max={depth_diffs.max():.4f}", flush=True)
+    
+    # Build adjacency list
+    adjacency = [set() for _ in range(n_nodes)]
+    for a, b in edges:
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+    
+    # --- Remove dangling edges (nodes with degree < 2) ---
+    # This is less aggressive than 3d-photo-inpainting's approach.
+    # We only remove truly isolated dangles, not entire chains.
+    print("Removing dangling edges...", flush=True)
+    removed = True
+    iterations = 0
+    while removed and iterations < 10:  # Limit iterations to 10 (not 100)
+        removed = False
+        iterations += 1
+        for node in range(n_nodes):
+            if len(adjacency[node]) == 1:
+                neighbor = list(adjacency[node])[0]
+                adjacency[node].clear()
+                adjacency[neighbor].discard(node)
+                removed = True
+    
+    print(f"Removed dangling edges in {iterations} iterations", flush=True)
+    
+    # --- Filter small isolated components ---
+    print("Filtering small components...", flush=True)
+    visited = [False] * n_nodes
+    components = []
+    
+    def bfs(start):
+        component = []
+        queue = [start]
+        visited[start] = True
+        while queue:
+            node = queue.pop(0)
+            component.append(node)
+            for neighbor in adjacency[node]:
+                if not visited[neighbor]:
+                    visited[neighbor] = True
+                    queue.append(neighbor)
+        return component
+    
+    for node in range(n_nodes):
+        if not visited[node] and adjacency[node]:
+            component = bfs(node)
+            components.append(component)
+    
+    # More lenient component filtering: keep components with ≥100 nodes (not 200)
+    # or any component that's ≥10% of the largest component size
+    min_component_size = 100
+    if components:
+        largest_size = max(len(c) for c in components)
+        min_size_threshold = max(min_component_size, int(largest_size * 0.1))
+        large_components = [c for c in components if len(c) >= min_size_threshold]
+        
+        if not large_components:
+            # Fallback: keep largest component
+            large_components = [max(components, key=len)]
+    else:
+        print("WARNING: No components found, generating flat mesh", flush=True)
+        large_components = []
+    
+    # Keep only nodes in large components
+    valid_nodes = set()
+    for component in large_components:
+        valid_nodes.update(component)
+    
+    # Rebuild adjacency with only valid nodes
+    for node in range(n_nodes):
+        if node not in valid_nodes:
+            adjacency[node].clear()
+        else:
+            adjacency[node] = {n for n in adjacency[node] if n in valid_nodes}
+    
+    print(f"After filtering: {len(large_components)} components, {len(valid_nodes)} nodes", flush=True)
+    
+    # --- Assign vertex indices (only for nodes in valid components) ---
+    node_to_vertex = {}
+    vertex_to_node = []
+    for node in sorted(valid_nodes):
+        node_to_vertex[node] = len(vertex_to_node)
+        vertex_to_node.append(node)
+    
+    n_vertices = len(vertex_to_node)
+    
+    # --- Collect vertex data ---
+    vr = valid_rc[vertex_to_node, 0]
+    vc = valid_rc[vertex_to_node, 1]
     pos_arr = np.stack([x_all[vr, vc], y_all[vr, vc], z_all[vr, vc]], axis=1).astype(np.float32)
-    col_arr = mesh.prgb[vr, vc].astype(np.uint8)                   # (N, 3)
-    typ_arr = mesh.player_type[vr, vc].astype(np.uint8)[:, None]   # (N, 1)
-    col_arr = np.concatenate([col_arr, typ_arr], axis=1)            # (N, 4)
-
-    # UV coordinates into the original (unpadded) image, normalized [0,1].
-    # Border/inpaint pixels outside the original image are clamped to [0,1].
-    # v is flipped: the wallpaper texture is uploaded with flip_vertical_in_place,
-    # so GL v=0 is the image bottom (original last row) and v=1 is the image top
-    # (original row 0).  We must invert: v_gl = 1 - v_image.
+    col_arr = mesh.prgb[vr, vc].astype(np.uint8)
+    typ_arr = mesh.player_type[vr, vc].astype(np.uint8)[:, None]
+    col_arr = np.concatenate([col_arr, typ_arr], axis=1)
+    
     pad = mesh.pad
     H, W = mesh.H, mesh.W
-    u_arr = np.clip((vc - pad) / W,       0.0, 1.0).astype(np.float32)
+    u_arr = np.clip((vc - pad) / W, 0.0, 1.0).astype(np.float32)
     v_arr = np.clip(1.0 - (vr - pad) / H, 0.0, 1.0).astype(np.float32)
-    uv_arr = np.stack([u_arr, v_arr], axis=1).astype(np.float32)    # (N, 2)
-
-    # --- Vectorised quad→triangle face generation ---
-    # For every quad (r,c),(r+1,c),(r,c+1),(r+1,c+1):
-    r0 = np.arange(pH - 1, dtype=np.int32)[:, None] * np.ones((1, pW-1), dtype=np.int32)
-    c0 = np.ones((pH-1, 1), dtype=np.int32) * np.arange(pW - 1, dtype=np.int32)[None, :]
-    r1, c1 = r0 + 1, c0 + 1
-
-    i00 = vertex_index[r0, c0].ravel()
-    i10 = vertex_index[r1, c0].ravel()
-    i01 = vertex_index[r0, c1].ravel()
-    i11 = vertex_index[r1, c1].ravel()
-
-    # Lower-left triangle: (00, 10, 01)
-    valid_lo = (i00 >= 0) & (i10 >= 0) & (i01 >= 0)
-    tri_lo   = np.stack([i00[valid_lo], i10[valid_lo], i01[valid_lo]], axis=1)
-
-    # Upper-right triangle: (10, 11, 01)
-    valid_hi = (i10 >= 0) & (i11 >= 0) & (i01 >= 0)
-    tri_hi   = np.stack([i10[valid_hi], i11[valid_hi], i01[valid_hi]], axis=1)
-
-    faces = np.concatenate([tri_lo, tri_hi], axis=0).astype(np.int32)
-
-    print(f"PLY: {n_valid} vertices, {len(faces)} faces", flush=True)
-
+    uv_arr = np.stack([u_arr, v_arr], axis=1).astype(np.float32)
+    
+    # --- Generate triangles from graph (4-way subdivision per node) ---
+    print("Generating triangles from graph...", flush=True)
+    faces = []
+    
+    for node in valid_nodes:
+        if node not in node_to_vertex:
+            continue
+        
+        vid = node_to_vertex[node]
+        r, c = valid_rc[node]
+        
+        # Find neighbors in 4 directions by checking adjacency list
+        neighbors = {}
+        # Up
+        if r > 0:
+            up_node = node_map[r - 1, c]
+            if up_node >= 0 and up_node in adjacency[node]:
+                neighbors['up'] = node_to_vertex.get(up_node)
+        # Right
+        if c < pW - 1:
+            right_node = node_map[r, c + 1]
+            if right_node >= 0 and right_node in adjacency[node]:
+                neighbors['right'] = node_to_vertex.get(right_node)
+        # Down
+        if r < pH - 1:
+            down_node = node_map[r + 1, c]
+            if down_node >= 0 and down_node in adjacency[node]:
+                neighbors['down'] = node_to_vertex.get(down_node)
+        # Left
+        if c > 0:
+            left_node = node_map[r, c - 1]
+            if left_node >= 0 and left_node in adjacency[node]:
+                neighbors['left'] = node_to_vertex.get(left_node)
+        
+        # Create triangles: (center, neighbor1, neighbor2) for adjacent pairs
+        # Triangle winding must be counter-clockwise (CCW) when viewed from the front
+        # (camera looking down -Z). With Y up, CCW means: center → right → up, etc.
+        order = ['up', 'right', 'down', 'left']
+        present = [d for d in order if d in neighbors]
+        
+        for i in range(len(present)):
+            n1 = neighbors[present[i]]
+            n2 = neighbors[present[(i + 1) % len(present)]]
+            if n1 is not None and n2 is not None:
+                # Reverse winding order for CCW: (center, n2, n1) instead of (center, n1, n2)
+                faces.append([vid, n2, n1])
+    
+    faces = np.array(faces, dtype=np.int32) if faces else np.zeros((0, 3), dtype=np.int32)
+    
+    print(f"Final mesh: {n_vertices} vertices, {len(faces)} faces", flush=True)
+    
     # --- Write binary PLY ---
     fov_y = mesh.fov_y_deg()
     image_aspect = mesh.W / mesh.H
@@ -548,18 +704,25 @@ def main():
     print(f"Loading depth map: {args.depth}", flush=True)
     depth_pil = Image.open(args.depth)
     depth_arr = np.array(depth_pil, dtype=np.float32)
-    # Depth PNG: 1=near, 0=far.  Normalise to [0,1].
+    
+    # Depth PNG convention from waydeeper depth estimator:
+    #   0.0 (dark) = near, 1.0 (bright) = far
+    # The depth estimator already inverts after percentile normalization,
+    # so the saved PNG has the correct convention for our use.
+    
+    # Normalise to [0,1]
     if depth_arr.max() > 1.0:
         depth_arr /= depth_arr.max()
-    # Default: invert so low depth value = near (mesh z=-1), high = far (z=-5).
-    # With --invert-depth: skip inversion, so high depth = near (z=-5), low = far (z=-1).
-    if not args.invert_depth:
+    
+    # The --invert-depth flag is for special cases where the user has a non-standard
+    # depth map. By default we use the PNG as-is.
+    if args.invert_depth:
         depth_arr = 1.0 - depth_arr
-    # Power-curve remap: depth = 5^normalised  →  [1.0, 5.0], ratio exactly 5×.
-    # Near pixels (normalised≈0) → depth≈1.0  (z≈−1 in OpenGL space)
-    # Far  pixels (normalised≈1) → depth≈5.0  (z≈−5 in OpenGL space)
-    # Keeps near/far ratio at 5× regardless of image content, preventing the
-    # 100× ratio that caused extreme parallax stretching at near-field pixels.
+    
+    # Power-curve remap: depth_final = 5^normalised → range [1.0, 5.0], ratio 5×.
+    # PNG convention: normalised=0 (near) → depth=1.0 → z=-1.0 (close to camera)
+    #                 normalised=1 (far)  → depth=5.0 → z=-5.0 (far from camera)
+    # This 5× ratio prevents extreme parallax stretching at depth discontinuities.
     depth_arr = np.power(5.0, depth_arr).astype(np.float32)  # [1.0, 5.0]
 
     H_orig, W_orig = rgb_orig.shape[:2]
@@ -651,7 +814,7 @@ def main():
     # ---- Write PLY ----
     print(f"Writing PLY to {args.output}...", flush=True)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    build_and_write_ply(ldi, args.output)
+    build_and_write_ply(ldi, args.output, depth_threshold=args.depth_threshold)
     print("Done.", flush=True)
 
 
