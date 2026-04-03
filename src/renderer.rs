@@ -501,8 +501,7 @@ impl EglRenderer {
         // Set circle center: cursor position if active, otherwise screen center
         if self.mouse.mouse_in_window && self.mouse.is_animating {
             self.transition_center_x = self.mouse.current_x as f32;
-            // Flip Y: mouse y=0 is top, shader uv y=0 is bottom
-            self.transition_center_y = (1.0 - self.mouse.current_y) as f32;
+            self.transition_center_y = self.mouse.current_y as f32;
         } else {
             self.transition_center_x = 0.5;
             self.transition_center_y = 0.5;
