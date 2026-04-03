@@ -744,6 +744,165 @@ impl EglRenderer {
         self.screen_width = width.max(1);
         self.screen_height = height.max(1);
     }
+
+    pub fn reload_textures(&mut self, wallpaper_path: &str, depth_path: &str) -> Result<()> {
+        let gl = self.gl_context.as_ref().ok_or_else(|| anyhow!("no GL"))?;
+        let wallpaper_raw = image::open(wallpaper_path)?.to_rgba8();
+        self.image_width = wallpaper_raw.width();
+        self.image_height = wallpaper_raw.height();
+        let depth_raw = image::open(depth_path)?.to_luma8();
+
+        let mut wallpaper = wallpaper_raw;
+        image::imageops::flip_vertical_in_place(&mut wallpaper);
+        let mut depth = depth_raw;
+        image::imageops::flip_vertical_in_place(&mut depth);
+
+        log::info!(
+            "Reload textures: wallpaper {}x{}, depth {}x{}",
+            self.image_width,
+            self.image_height,
+            depth.width(),
+            depth.height()
+        );
+
+        unsafe {
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+
+            if let Some(old_tex) = self.wallpaper_texture.take() {
+                gl.delete_texture(old_tex);
+            }
+            if let Some(old_tex) = self.depth_texture.take() {
+                gl.delete_texture(old_tex);
+            }
+
+            let wallpaper_tex = gl.create_texture().map_err(gl_error)?;
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(wallpaper_tex));
+            set_texture_params(gl);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                self.image_width as i32,
+                self.image_height as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                Some(&wallpaper),
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            self.wallpaper_texture = Some(wallpaper_tex);
+
+            let depth_tex = gl.create_texture().map_err(gl_error)?;
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(depth_tex));
+            set_texture_params(gl);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::R8 as i32,
+                depth.width() as i32,
+                depth.height() as i32,
+                0,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+                Some(depth.as_raw()),
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            self.depth_texture = Some(depth_tex);
+        }
+        log::info!("Textures reloaded");
+        Ok(())
+    }
+
+    pub fn reload_mesh(&mut self, ply_path: &str) -> Result<()> {
+        let gl = self.gl_context.as_ref().ok_or_else(|| anyhow!("no GL"))?;
+
+        let mesh = Mesh::load_ply(std::path::Path::new(ply_path))?;
+
+        self.mesh_camera_z   = 0.0;
+        self.mesh_near_z     = mesh.aabb[5].abs().max(0.1);
+        self.mesh_xy_half    = mesh.xy_half_extent().max(0.001);
+        self.mesh_fov_y_deg    = mesh.fov_y_deg;
+        self.mesh_image_aspect = mesh.image_aspect.max(0.01);
+        self.mesh_index_count  = mesh.indices.len() as u32;
+        self.mesh_has_uvs      = mesh.has_uvs;
+
+        log::info!(
+            "Mesh reloaded: {} verts, near_z={:.3}, xy_half={:.3}, depth_range={:.3}, fov_y={:.2}°, image_aspect={:.4}",
+            mesh.vertex_count, self.mesh_near_z, self.mesh_xy_half,
+            mesh.depth_range(), self.mesh_fov_y_deg, self.mesh_image_aspect
+        );
+
+        unsafe {
+            if let Some(old) = self.mesh_vao.take() { gl.delete_vertex_array(old); }
+            if let Some(old) = self.mesh_pos_vbo.take() { gl.delete_buffer(old); }
+            if let Some(old) = self.mesh_col_vbo.take() { gl.delete_buffer(old); }
+            if let Some(old) = self.mesh_uv_vbo.take() { gl.delete_buffer(old); }
+            if let Some(old) = self.mesh_ebo.take() { gl.delete_buffer(old); }
+
+            let vao = gl.create_vertex_array().map_err(gl_error)?;
+            gl.bind_vertex_array(Some(vao));
+
+            let pos_vbo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(pos_vbo));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&mesh.positions),
+                glow::STATIC_DRAW,
+            );
+            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
+            gl.enable_vertex_attrib_array(0);
+
+            let col_vbo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(col_vbo));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                &mesh.colors,
+                glow::STATIC_DRAW,
+            );
+            gl.vertex_attrib_pointer_f32(1, 4, glow::UNSIGNED_BYTE, true, 4, 0);
+            gl.enable_vertex_attrib_array(1);
+
+            let uv_vbo = if mesh.has_uvs && !mesh.uvs.is_empty() {
+                let vbo = gl.create_buffer().map_err(gl_error)?;
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+                gl.buffer_data_u8_slice(
+                    glow::ARRAY_BUFFER,
+                    bytemuck::cast_slice(&mesh.uvs),
+                    glow::STATIC_DRAW,
+                );
+                gl.vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, 8, 0);
+                gl.enable_vertex_attrib_array(2);
+                Some(vbo)
+            } else {
+                None
+            };
+
+            let ebo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
+            gl.buffer_data_u8_slice(
+                glow::ELEMENT_ARRAY_BUFFER,
+                bytemuck::cast_slice(&mesh.indices),
+                glow::STATIC_DRAW,
+            );
+
+            gl.bind_vertex_array(None);
+
+            self.mesh_vao     = Some(vao);
+            self.mesh_pos_vbo = Some(pos_vbo);
+            self.mesh_col_vbo = Some(col_vbo);
+            self.mesh_uv_vbo  = uv_vbo;
+            self.mesh_ebo     = Some(ebo);
+        }
+
+        log::info!(
+            "Mesh reuploaded: {} vertices, {} triangles",
+            mesh.vertex_count,
+            mesh.triangle_count
+        );
+        Ok(())
+    }
 }
 
 impl Drop for EglRenderer {

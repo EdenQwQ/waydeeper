@@ -170,16 +170,16 @@ enum Commands {
         /// Disable 3D inpainting mode
         #[arg(long)]
         no_inpaint: bool,
-        /// Enable verbose logging
-        #[arg(short, long)]
-        verbose: bool,
     },
 
-    /// Start or reload daemons for configured monitors. Reads config, generates assets, spawns/reloads daemons.
+    /// Start daemons for configured monitors. If a daemon is already running, it will be skipped. Use `set` to reload with new config, or `stop` first to restart.
     Daemon {
         /// Target monitor name, or omit to start all configured monitors
         #[arg(short, long)]
         monitor: Option<String>,
+        /// Force regenerate depth map and inpaint mesh
+        #[arg(long)]
+        regenerate: bool,
         /// Enable verbose logging
         #[arg(short, long)]
         verbose: bool,
@@ -300,7 +300,6 @@ fn handle_command(command: Commands) -> Result<()> {
             no_invert_depth,
             inpaint,
             no_inpaint,
-            verbose,
         } => cmd_set(
             &image,
             AnimationParams {
@@ -321,13 +320,13 @@ fn handle_command(command: Commands) -> Result<()> {
             no_invert_depth,
             inpaint,
             no_inpaint,
-            verbose,
         ),
 
         Commands::Daemon {
             monitor,
+            regenerate,
             verbose,
-        } => cmd_daemon(monitor.as_deref(), verbose),
+        } => cmd_daemon(monitor.as_deref(), regenerate, verbose),
 
         Commands::Stop { monitor } => cmd_stop(monitor.as_deref()),
         Commands::ListMonitors => cmd_list_monitors(),
@@ -524,7 +523,36 @@ fn send_reload(
     if !response.success {
         return Err(anyhow!("Reload rejected: {:?}", response.error));
     }
-    Ok(())
+
+    // Always poll STATUS for progress and logs
+    let max_attempts = 600; // 5 minutes at 500ms intervals
+    for _ in 0..max_attempts {
+        std::thread::sleep(Duration::from_millis(500));
+        match client.send_command("STATUS", serde_json::Value::Null, Duration::from_secs(2)) {
+            Ok(status) => {
+                if let Some(logs) = status.result.as_ref().and_then(|r| r.get("logs")) {
+                    if let Some(log_array) = logs.as_array() {
+                        for log_entry in log_array {
+                            if let Some(msg) = log_entry.as_str() {
+                                println!("  [daemon] {}", msg);
+                            }
+                        }
+                    }
+                }
+                let complete = status.result.as_ref()
+                    .and_then(|r| r.get("complete"))
+                    .and_then(|r| r.as_bool())
+                    .unwrap_or(false);
+                if complete {
+                    return Ok(());
+                }
+            }
+            Err(_) => {
+                return Err(anyhow!("Lost connection to daemon during reload"));
+            }
+        }
+    }
+    Err(anyhow!("Reload timed out"))
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +570,6 @@ fn cmd_set(
     no_invert_depth: bool,
     use_inpaint: bool,
     no_inpaint: bool,
-    verbose: bool,
 ) -> Result<()> {
     let image_path = std::fs::canonicalize(image)
         .map_err(|_| anyhow!("Image not found: {}", image))?;
@@ -551,32 +578,6 @@ fn cmd_set(
     let model_path = model
         .map(|name| models::get_model_path(name).map(|path| path.to_string_lossy().to_string()))
         .transpose()?;
-
-    // Generate depth map
-    {
-        let mut daemon = DepthWallpaperDaemon::new()?;
-        daemon.load_configuration();
-
-        let model_display = model.unwrap_or("auto");
-        println!(
-            "Generating depth map for {} using model '{}'...",
-            image_path_string, model_display
-        );
-
-        match daemon.pregenerate_depth_map(&image_path_string, model_path.as_deref(), regenerate) {
-            Ok(depth_path) => {
-                if let Some(ref estimator) = daemon.depth_estimator {
-                    println!("Depth map ready (model: {}): {}", estimator.model_name, depth_path);
-                } else {
-                    println!("Depth map ready: {}", depth_path);
-                }
-            }
-            Err(error) => {
-                println!("Failed to generate depth map: {}", error);
-                return Err(error);
-            }
-        }
-    }
 
     // Update config with only explicitly provided parameters
     {
@@ -638,7 +639,7 @@ fn cmd_set(
         config::save_config(&config)?;
     }
 
-    // Generate inpaint mesh if needed
+    // Read back config for resolved values
     let config = config::load_config().unwrap_or_default();
     let monitor_config = config.monitors.get(monitor).cloned().unwrap_or_default();
     let resolved_params = animation_params.resolve(&monitor_config);
@@ -647,29 +648,7 @@ fn cmd_set(
         .as_deref()
         .or(monitor_config.model_path.as_deref());
 
-    if monitor_config.use_inpaint {
-        let mut daemon = DepthWallpaperDaemon::new()?;
-        daemon.load_configuration();
-        let depth_path = daemon.ensure_depth_map_exists(
-            &image_path_string,
-            effective_model,
-            regenerate,
-        )?;
-        match daemon.ensure_ply_exists(
-            &image_path_string,
-            &depth_path,
-            &monitor_config.inpaint_python,
-            regenerate,
-            monitor_config.invert_depth,
-        ) {
-            Ok(ply) => println!("Inpaint mesh ready: {}", ply),
-            Err(err) => {
-                println!("Inpainting failed, using flat depth mode: {}", err);
-            }
-        }
-    }
-
-    // Reload existing daemon or spawn new one
+    // Reload existing daemon or spawn new one — daemon handles ALL heavy lifting
     if let Ok(client) = DaemonClient::new(monitor) {
         if client.is_running() {
             println!("Reloading wallpaper daemon for monitor {}...", monitor);
@@ -699,7 +678,7 @@ fn cmd_set(
         monitor_config.invert_depth,
         monitor_config.use_inpaint,
         &monitor_config.inpaint_python,
-        verbose,
+        false,
     )?;
 
     if wait_for_daemon(monitor, 180, &mut child) {
@@ -714,7 +693,7 @@ fn cmd_set(
 // cmd_daemon
 // ---------------------------------------------------------------------------
 
-fn cmd_daemon(monitor: Option<&str>, verbose: bool) -> Result<()> {
+fn cmd_daemon(monitor: Option<&str>, regenerate: bool, verbose: bool) -> Result<()> {
     let config = config::load_config()?;
 
     if config.monitors.is_empty() {
@@ -734,7 +713,7 @@ fn cmd_daemon(monitor: Option<&str>, verbose: bool) -> Result<()> {
     }
 
     let mut started = 0;
-    let mut reloaded = 0;
+    let mut skipped = 0;
     let mut failed = 0;
 
     for monitor_id in &target_monitors {
@@ -781,42 +760,11 @@ fn cmd_daemon(monitor: Option<&str>, verbose: bool) -> Result<()> {
 
         let effective_model = monitor_config.model_path.as_deref();
 
-        // Check if daemon is already running
+        // Check if daemon is already running — always skip, never reload
         if let Ok(client) = DaemonClient::new(monitor_id) {
             if client.is_running() {
-                println!("Reloading daemon for monitor {}...", monitor_id);
-                let reload_params = ReloadParams {
-                    wallpaper_path: wallpaper_path.clone(),
-                    strength_x: resolved_params.strength_x,
-                    strength_y: resolved_params.strength_y,
-                    smooth_animation: resolved_params.smooth_animation,
-                    animation_speed: resolved_params.animation_speed,
-                    fps: resolved_params.fps,
-                    active_delay_ms: resolved_params.active_delay,
-                    idle_timeout_ms: resolved_params.idle_timeout,
-                    invert_depth: monitor_config.invert_depth,
-                    use_inpaint: monitor_config.use_inpaint,
-                    model_path: monitor_config.model_path.clone(),
-                    regenerate: false,
-                    inpaint_python: monitor_config.inpaint_python.clone(),
-                };
-                match client.send_command("RELOAD", json!(reload_params), Duration::from_secs(10)) {
-                    Ok(response) if response.success => {
-                        println!("Reloaded daemon for monitor {}.", monitor_id);
-                        reloaded += 1;
-                    }
-                    Ok(_) => {
-                        println!("Reload rejected for monitor {}, restarting...", monitor_id);
-                        // Fall through to stop + spawn
-                        let _ = ipc::stop_daemon(monitor_id, Duration::from_secs(5));
-                        std::thread::sleep(Duration::from_millis(300));
-                    }
-                    Err(_) => {
-                        println!("IPC failed for monitor {}, restarting...", monitor_id);
-                        let _ = ipc::stop_daemon(monitor_id, Duration::from_secs(5));
-                        std::thread::sleep(Duration::from_millis(300));
-                    }
-                }
+                println!("Daemon for monitor {} is already running. Use 'set' to reload with new config, or 'stop' first.", monitor_id);
+                skipped += 1;
                 continue;
             }
         }
@@ -830,7 +778,7 @@ fn cmd_daemon(monitor: Option<&str>, verbose: bool) -> Result<()> {
             monitor_id,
             &resolved_params,
             effective_model,
-            false,
+            regenerate,
             monitor_config.invert_depth,
             monitor_config.use_inpaint,
             &monitor_config.inpaint_python,
@@ -855,7 +803,7 @@ fn cmd_daemon(monitor: Option<&str>, verbose: bool) -> Result<()> {
     }
 
     if started  > 0 { println!("\nStarted {} daemon(s).", started); }
-    if reloaded > 0 { println!("\nReloaded {} daemon(s).", reloaded); }
+    if skipped  > 0 { println!("\nSkipped {} daemon(s) already running.", skipped); }
     if failed   > 0 { println!("Failed to start {} daemon(s).", failed); }
 
     if failed > 0 {

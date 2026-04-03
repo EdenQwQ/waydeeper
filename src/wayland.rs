@@ -30,7 +30,8 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport, wp_viewporter},
 };
 
-use crate::ipc::ReloadState;
+use crate::daemon::DepthWallpaperDaemon;
+use crate::ipc::{ReloadParams, ReloadResult, ReloadState};
 use crate::renderer::{EglRenderer, RendererConfig};
 
 pub struct App {
@@ -199,9 +200,63 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
             break;
         }
 
-        if reload_state.pending.load(Ordering::SeqCst) {
-            log::info!("renderer: reload requested, returning to daemon loop");
-            return Ok(());
+        // Check for reload: generate assets in background thread while rendering continues
+        if reload_state.params.lock().unwrap().is_some() && !reload_state.generating.load(Ordering::SeqCst) {
+            reload_state.generating.store(true, Ordering::SeqCst);
+            let params = reload_state.params.lock().unwrap().take().unwrap();
+            let reload_state_clone = reload_state.clone();
+
+            std::thread::spawn(move || {
+                reload_state_clone.push_log("Generating depth map...".to_string());
+                let result = generate_reload_assets(&params);
+                match result {
+                    Ok(reload_result) => {
+                        let mut guard = reload_state_clone.result.lock().unwrap();
+                        *guard = Some(reload_result);
+                        reload_state_clone.push_log("Assets ready, swapping...".to_string());
+                        reload_state_clone.ready.store(true, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        reload_state_clone.push_log(format!("Reload failed: {}", e));
+                        reload_state_clone.generating.store(false, Ordering::SeqCst);
+                    }
+                }
+            });
+        }
+
+        // Check if reload assets are ready — swap in-place
+        if reload_state.ready.swap(false, Ordering::SeqCst) {
+            if let Some(result) = reload_state.result.lock().unwrap().take() {
+                log::info!("Reload assets ready, swapping in-place...");
+                if let Err(e) = app.renderer.reload_textures(&result.wallpaper_path, &result.depth_path) {
+                    log::warn!("Texture reload failed: {}", e);
+                }
+                if result.use_inpaint {
+                    if let Some(ref ply_path) = result.ply_path {
+                        if let Err(e) = app.renderer.reload_mesh(ply_path) {
+                            log::warn!("Mesh reload failed, falling back to flat mode: {}", e);
+                            app.renderer.config.ply_path = None;
+                        } else {
+                            app.renderer.config.ply_path = Some(ply_path.clone());
+                        }
+                    } else {
+                        app.renderer.config.ply_path = None;
+                    }
+                } else {
+                    app.renderer.config.ply_path = None;
+                }
+                app.renderer.config.strength_x = result.strength_x;
+                app.renderer.config.strength_y = result.strength_y;
+                app.renderer.config.smooth_animation = result.smooth_animation;
+                app.renderer.config.animation_speed = result.animation_speed;
+                app.renderer.config.fps = result.fps;
+                app.renderer.config.active_delay_ms = result.active_delay_ms;
+                app.renderer.config.idle_timeout_ms = result.idle_timeout_ms;
+                app.renderer.config.invert_depth = result.invert_depth;
+                reload_state.push_log("Reload complete, wallpaper updated seamlessly".to_string());
+                reload_state.mark_reload_complete();
+            }
+            reload_state.generating.store(false, Ordering::SeqCst);
         }
 
         let _ = event_queue.dispatch_pending(&mut app);
@@ -226,57 +281,54 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
     Ok(())
 }
 
-impl Dispatch<wp_viewporter::WpViewporter, ()> for App {
-    fn event(
-        _: &mut Self,
-        _: &wp_viewporter::WpViewporter,
-        _: wp_viewporter::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
+fn generate_reload_assets(params: &ReloadParams) -> Result<ReloadResult> {
+    let mut daemon = DepthWallpaperDaemon::new()?;
+    daemon.load_configuration();
 
-impl Dispatch<wp_viewport::WpViewport, ()> for App {
-    fn event(
-        _: &mut Self,
-        _: &wp_viewport::WpViewport,
-        _: wp_viewport::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
+    let wallpaper = &params.wallpaper_path;
+    let model = params.model_path.clone();
 
-impl Dispatch<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1, ()> for App {
-    fn event(
-        _: &mut Self,
-        _: &wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
-        _: wp_fractional_scale_manager_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
+    log::info!("Generating depth map for reload: {}...", wallpaper);
+    let depth_path = daemon.ensure_depth_map_exists(wallpaper, model.as_deref(), params.regenerate)?;
 
-impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for App {
-    fn event(
-        state: &mut Self,
-        _: &wp_fractional_scale_v1::WpFractionalScaleV1,
-        event: wp_fractional_scale_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            let actual_scale = scale as f64 / 120.0;
-            state.fractional_scale_value = Some(actual_scale);
-            log::info!("wp_fractional_scale_v1: preferred_scale = {:.2}", actual_scale);
+    let ply_path = if params.use_inpaint {
+        match daemon.ensure_ply_exists(
+            wallpaper,
+            &depth_path,
+            &params.inpaint_python,
+            params.regenerate,
+            params.invert_depth,
+        ) {
+            Ok(path) => {
+                log::info!("Inpaint mesh ready for reload: {}", path);
+                Some(path)
+            }
+            Err(err) => {
+                log::warn!(
+                    "Inpainting failed during reload, falling back to flat depth mode: {}",
+                    err
+                );
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
+
+    Ok(ReloadResult {
+        wallpaper_path: wallpaper.clone(),
+        depth_path,
+        ply_path,
+        strength_x: params.strength_x,
+        strength_y: params.strength_y,
+        smooth_animation: params.smooth_animation,
+        animation_speed: params.animation_speed,
+        fps: params.fps,
+        active_delay_ms: params.active_delay_ms,
+        idle_timeout_ms: params.idle_timeout_ms,
+        invert_depth: params.invert_depth,
+        use_inpaint: params.use_inpaint,
+    })
 }
 
 impl CompositorHandler for App {
@@ -411,11 +463,9 @@ impl LayerShellHandler for App {
                 log::error!("EGL surface creation failed: {}", error);
                 return;
             }
-            // Always load textures — needed for flat mode and as background in mesh mode.
             if let Err(error) = self.renderer.load_textures() {
                 log::error!("Texture loading failed: {}", error);
             }
-            // If a PLY mesh is available, also load it (on top of the textures).
             if let Some(ply_path) = self.renderer.config.ply_path.clone() {
                 if let Err(error) = self.renderer.load_mesh(&ply_path) {
                     log::error!("Mesh loading failed, falling back to flat mode: {}", error);
@@ -506,6 +556,59 @@ impl ProvidesRegistryState for App {
     registry_handlers![OutputState, SeatState];
 }
 
+impl Dispatch<wp_viewporter::WpViewporter, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &wp_viewporter::WpViewporter,
+        _: wp_viewporter::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_viewport::WpViewport, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &wp_viewport::WpViewport,
+        _: wp_viewport::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        _: wp_fractional_scale_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for App {
+    fn event(
+        state: &mut Self,
+        _: &wp_fractional_scale_v1::WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            let actual_scale = scale as f64 / 120.0;
+            state.fractional_scale_value = Some(actual_scale);
+            log::info!("wp_fractional_scale_v1: preferred_scale = {:.2}", actual_scale);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Output probe — lightweight struct used only for enumerating connected outputs
 // ---------------------------------------------------------------------------
@@ -547,7 +650,6 @@ delegate_seat!(OutputProbe);
 delegate_registry!(OutputProbe);
 
 /// Return the names of all currently connected Wayland outputs.
-/// Makes a brief Wayland connection, enumerates outputs, then disconnects.
 pub fn list_connected_outputs() -> Vec<String> {
     let Ok(connection) = Connection::connect_to_env() else { return Vec::new() };
     let Ok((globals, mut event_queue)) = registry_queue_init(&connection) else { return Vec::new() };
@@ -559,7 +661,6 @@ pub fn list_connected_outputs() -> Vec<String> {
         output_state: OutputState::new(&globals, &queue_handle),
     };
 
-    // A few roundtrips to let the compositor send all wl_output events
     for _ in 0..4 {
         let _ = event_queue.dispatch_pending(&mut probe);
         let _ = event_queue.flush();

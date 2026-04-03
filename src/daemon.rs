@@ -112,8 +112,6 @@ impl DepthWallpaperDaemon {
     }
 
     /// Ensure a PLY inpaint mesh exists for the given image + depth map.
-    ///
-    /// Returns the path to the PLY file (either cached or freshly generated).
     pub fn ensure_ply_exists(
         &mut self,
         image_path: &str,
@@ -195,7 +193,6 @@ impl DepthWallpaperDaemon {
     pub fn clear_cache(&mut self) -> Result<()> {
         self.ensure_cache_initialized()?;
         self.cache_manager.as_ref().unwrap().clear_cache()?;
-        // Also clear inpaint cache if initialized
         if let Ok(()) = self.ensure_inpaint_cache_initialized() {
             self.inpaint_cache.as_ref().unwrap().clear_cache()?;
         }
@@ -290,10 +287,10 @@ impl DepthWallpaperDaemon {
         effective_config.use_inpaint = use_inpaint;
         effective_config.inpaint_python = inpaint_python.to_string();
 
-        let mut current_state = DaemonState {
+        let initial_state = DaemonState {
             wallpaper_path: wallpaper_path.to_string(),
             depth_path: String::new(),
-            ply_path: if use_inpaint { None } else { None },
+            ply_path: None,
             strength_x,
             strength_y,
             smooth_animation,
@@ -308,7 +305,7 @@ impl DepthWallpaperDaemon {
             inpaint_python: inpaint_python.to_string(),
         };
 
-        self.run_daemon_loop(&monitor_id, &running, &reload_state, &mut current_state)
+        self.run_daemon_loop(&monitor_id, &running, &reload_state, initial_state)
     }
 
     fn run_daemon_loop(
@@ -316,122 +313,106 @@ impl DepthWallpaperDaemon {
         monitor_id: &str,
         running: &Arc<AtomicBool>,
         reload_state: &Arc<ReloadState>,
-        state: &mut DaemonState,
+        mut state: DaemonState,
     ) -> Result<()> {
         let monitor_id = monitor_id.to_string();
-        loop {
-            if !running.load(Ordering::SeqCst) {
-                log::info!("Daemon exiting cleanly");
-                break;
-            }
 
-            let wallpaper = state.wallpaper_path.clone();
-            let model = state.model_path.clone();
+        // Initial asset generation
+        let wallpaper = state.wallpaper_path.clone();
+        let model = state.model_path.clone();
 
-            log::info!("Generating depth map for {}...", wallpaper);
-            let depth_path = self.ensure_depth_map_exists(&wallpaper, model.as_deref(), state.regenerate)?;
-            state.depth_path = depth_path.clone();
+        log::info!("Generating depth map for {}...", wallpaper);
+        let depth_path = self.ensure_depth_map_exists(&wallpaper, model.as_deref(), state.regenerate)?;
+        state.depth_path = depth_path.clone();
 
-            let ply_path = if state.use_inpaint {
-                match self.ensure_ply_exists(
-                    &wallpaper,
-                    &depth_path,
-                    &state.inpaint_python,
-                    state.regenerate,
-                    state.invert_depth,
-                ) {
-                    Ok(path) => {
-                        log::info!("Inpaint mesh ready: {}", path);
-                        Some(path)
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "Inpainting failed, falling back to flat depth mode: {}",
-                            err
-                        );
-                        None
-                    }
+        let ply_path = if state.use_inpaint {
+            match self.ensure_ply_exists(
+                &wallpaper,
+                &depth_path,
+                &state.inpaint_python,
+                state.regenerate,
+                state.invert_depth,
+            ) {
+                Ok(path) => {
+                    log::info!("Inpaint mesh ready: {}", path);
+                    Some(path)
                 }
-            } else {
-                None
-            };
-            state.ply_path = ply_path.clone();
+                Err(err) => {
+                    log::warn!(
+                        "Inpainting failed, falling back to flat depth mode: {}",
+                        err
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        state.ply_path = ply_path.clone();
 
-            log::info!("Starting wallpaper renderer on monitor {}...", monitor_id);
+        // Start IPC socket and renderer
+        let mut socket = DaemonSocket::new(&monitor_id)?;
+        let running_for_handler = running.clone();
+        let monitor_for_handler = monitor_id.clone();
+        let reload_for_handler = reload_state.clone();
 
-            let mut socket = DaemonSocket::new(&monitor_id)?;
-            let running_for_handler = running.clone();
-            let monitor_for_handler = monitor_id.clone();
-            let reload_for_handler = reload_state.clone();
-
-            let handler: crate::ipc::CommandHandler =
-                Arc::new(move |command: &str, params: &serde_json::Value| match command {
-                    "PING" => Ok(json!({"status": "pong"})),
-                    "STATUS" => Ok(json!({
+        let handler: crate::ipc::CommandHandler =
+            Arc::new(move |command: &str, params: &serde_json::Value| match command {
+                "PING" => Ok(json!({"status": "pong"})),
+                "STATUS" => {
+                    let generating = reload_for_handler.generating.load(Ordering::SeqCst);
+                    let complete = reload_for_handler.is_reload_complete();
+                    let logs = reload_for_handler.take_logs();
+                    Ok(json!({
                         "monitor": monitor_for_handler,
                         "running": running_for_handler.load(Ordering::SeqCst),
-                    })),
-                    "STOP" => {
-                        log::info!("Received STOP command via IPC");
-                        running_for_handler.store(false, Ordering::SeqCst);
-                        Ok(json!({"stopping": true}))
-                    }
-                    "RELOAD" => {
-                        log::info!("Received RELOAD command via IPC");
-                        let reload_params: Result<ReloadParams> = serde_json::from_value(params.clone())
-                            .map_err(|e| anyhow!("Invalid RELOAD params: {}", e));
-                        match reload_params {
-                            Ok(p) => {
-                                reload_for_handler.request_reload(p);
-                                Ok(json!({"reloaded": true}))
-                            }
-                            Err(e) => Err(e),
+                        "generating": generating,
+                        "complete": complete,
+                        "logs": logs,
+                    }))
+                }
+                "STOP" => {
+                    log::info!("Received STOP command via IPC");
+                    running_for_handler.store(false, Ordering::SeqCst);
+                    Ok(json!({"stopping": true}))
+                }
+                "RELOAD" => {
+                    log::info!("Received RELOAD command via IPC");
+                    let reload_params: Result<ReloadParams> = serde_json::from_value(params.clone())
+                        .map_err(|e| anyhow!("Invalid RELOAD params: {}", e));
+                    match reload_params {
+                        Ok(p) => {
+                            reload_for_handler.store_params(p);
+                            Ok(json!({"reloaded": true}))
                         }
+                        Err(e) => Err(e),
                     }
-                    _ => Err(anyhow!("Unknown command: {}", command)),
-                });
+                }
+                _ => Err(anyhow!("Unknown command: {}", command)),
+            });
 
-            socket.start(handler)?;
+        socket.start(handler)?;
 
-            let render_config = renderer::RendererConfig {
-                wallpaper_path: wallpaper.clone(),
-                depth_path: depth_path.clone(),
-                monitor: monitor_id.to_string(),
-                strength_x: state.strength_x,
-                strength_y: state.strength_y,
-                smooth_animation: state.smooth_animation,
-                animation_speed: state.animation_speed,
-                fps: state.fps,
-                active_delay_ms: state.active_delay_ms,
-                idle_timeout_ms: state.idle_timeout_ms,
-                invert_depth: state.invert_depth,
-                ply_path: ply_path.clone(),
-            };
+        let render_config = renderer::RendererConfig {
+            wallpaper_path: wallpaper.clone(),
+            depth_path: depth_path.clone(),
+            monitor: monitor_id.to_string(),
+            strength_x: state.strength_x,
+            strength_y: state.strength_y,
+            smooth_animation: state.smooth_animation,
+            animation_speed: state.animation_speed,
+            fps: state.fps,
+            active_delay_ms: state.active_delay_ms,
+            idle_timeout_ms: state.idle_timeout_ms,
+            invert_depth: state.invert_depth,
+            ply_path: ply_path.clone(),
+        };
 
-            crate::wayland::run(render_config, running.clone(), reload_state.clone())?;
+        // Run renderer — it handles reload checking internally
+        crate::wayland::run(render_config, running.clone(), reload_state.clone())?;
 
-            if !running.load(Ordering::SeqCst) {
-                log::info!("Daemon exiting cleanly");
-                break;
-            }
-
-            if let Some(new_params) = reload_state.take_pending() {
-                log::info!("Reloading with new configuration...");
-                state.wallpaper_path = new_params.wallpaper_path;
-                state.strength_x = new_params.strength_x;
-                state.strength_y = new_params.strength_y;
-                state.smooth_animation = new_params.smooth_animation;
-                state.animation_speed = new_params.animation_speed;
-                state.fps = new_params.fps;
-                state.active_delay_ms = new_params.active_delay_ms;
-                state.idle_timeout_ms = new_params.idle_timeout_ms;
-                state.invert_depth = new_params.invert_depth;
-                state.use_inpaint = new_params.use_inpaint;
-                state.model_path = new_params.model_path;
-                state.regenerate = new_params.regenerate;
-                state.inpaint_python = new_params.inpaint_python;
-                continue;
-            }
+        if !running.load(Ordering::SeqCst) {
+            log::info!("Daemon exiting cleanly");
         }
 
         Ok(())

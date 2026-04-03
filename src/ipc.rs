@@ -27,31 +27,63 @@ pub struct ReloadParams {
     pub inpaint_python: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReloadResult {
+    pub wallpaper_path: String,
+    pub depth_path: String,
+    pub ply_path: Option<String>,
+    pub strength_x: f64,
+    pub strength_y: f64,
+    pub smooth_animation: bool,
+    pub animation_speed: f64,
+    pub fps: u32,
+    pub active_delay_ms: f64,
+    pub idle_timeout_ms: f64,
+    pub invert_depth: bool,
+    pub use_inpaint: bool,
+}
+
 pub struct ReloadState {
-    pub pending: AtomicBool,
+    pub generating: AtomicBool,
+    pub ready: AtomicBool,
     pub params: Mutex<Option<ReloadParams>>,
+    pub result: Mutex<Option<ReloadResult>>,
+    pub log_messages: Mutex<Vec<String>>,
+    pub reload_complete: AtomicBool,
 }
 
 impl ReloadState {
     pub fn new() -> Self {
         Self {
-            pending: AtomicBool::new(false),
+            generating: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
             params: Mutex::new(None),
+            result: Mutex::new(None),
+            log_messages: Mutex::new(Vec::new()),
+            reload_complete: AtomicBool::new(false),
         }
     }
 
-    pub fn request_reload(&self, params: ReloadParams) {
+    pub fn store_params(&self, params: ReloadParams) {
         let mut guard = self.params.lock().unwrap();
         *guard = Some(params);
-        self.pending.store(true, Ordering::SeqCst);
+        self.reload_complete.store(false, Ordering::SeqCst);
     }
 
-    pub fn take_pending(&self) -> Option<ReloadParams> {
-        if self.pending.swap(false, Ordering::SeqCst) {
-            self.params.lock().unwrap().take()
-        } else {
-            None
-        }
+    pub fn push_log(&self, msg: String) {
+        self.log_messages.lock().unwrap().push(msg);
+    }
+
+    pub fn take_logs(&self) -> Vec<String> {
+        std::mem::take(&mut self.log_messages.lock().unwrap())
+    }
+
+    pub fn mark_reload_complete(&self) {
+        self.reload_complete.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_reload_complete(&self) -> bool {
+        self.reload_complete.load(Ordering::SeqCst)
     }
 }
 
@@ -219,7 +251,6 @@ impl Drop for DaemonSocket {
 }
 
 pub struct DaemonClient {
-    monitor: String,
     socket_path: PathBuf,
 }
 
@@ -229,7 +260,6 @@ impl DaemonClient {
         let socket_path = runtime_dir.join(format!("{}.sock", monitor));
 
         Ok(Self {
-            monitor: monitor.to_string(),
             socket_path,
         })
     }
@@ -251,7 +281,7 @@ impl DaemonClient {
         timeout: Duration,
     ) -> Result<IpcResponse> {
         if !self.socket_path.exists() {
-            return Err(anyhow!("Daemon not running for monitor {}", self.monitor));
+            return Err(anyhow!("Daemon not running"));
         }
 
         let mut stream = UnixStream::connect(&self.socket_path)?;
