@@ -119,9 +119,32 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Set wallpaper on a monitor, or reload an existing daemon with updated config.
+    ///
+    /// If a daemon is already running for the target monitor, it will be reloaded
+    /// with the new settings. Otherwise a new daemon is spawned. Omit IMAGE to use
+    /// the currently configured wallpaper (useful for regenerating or changing params).
     Set {
         /// Path to the wallpaper image (omit to use the configured image)
         image: Option<String>,
+        /// Target monitor name (e.g., eDP-1, HDMI-A-1)
+        #[arg(short, long, default_value = "0")]
+        monitor: String,
+        /// Depth model name (midas, depth-pro-q4) or path to .onnx file
+        #[arg(long)]
+        model: Option<String>,
+        /// Enable 3D inpainting for true parallax with occlusion
+        #[arg(long)]
+        inpaint: bool,
+        /// Disable 3D inpainting mode
+        #[arg(long)]
+        no_inpaint: bool,
+        /// Invert depth interpretation (near ↔ far)
+        #[arg(long)]
+        invert_depth: bool,
+        /// Disable depth inversion
+        #[arg(long)]
+        no_invert_depth: bool,
         /// Parallax strength for both axes (default: 0.02)
         #[arg(short, long)]
         strength: Option<f64>,
@@ -131,9 +154,6 @@ enum Commands {
         /// Parallax strength on Y axis (default: 0.02)
         #[arg(long)]
         strength_y: Option<f64>,
-        /// Target monitor name (e.g., eDP-1, HDMI-A-1)
-        #[arg(short, long, default_value = "0")]
-        monitor: String,
         /// Enable smooth easing animation
         #[arg(long)]
         smooth_animation: bool,
@@ -152,27 +172,15 @@ enum Commands {
         /// Idle timeout in ms before animation stops (default: 500)
         #[arg(long)]
         idle_timeout: Option<f64>,
-        /// Depth model name (midas, depth-pro-q4) or path to .onnx file
-        #[arg(long)]
-        model: Option<String>,
         /// Force regenerate depth map and inpaint mesh
         #[arg(long)]
         regenerate: bool,
-        /// Invert depth interpretation (near ↔ far)
-        #[arg(long)]
-        invert_depth: bool,
-        /// Disable depth inversion
-        #[arg(long)]
-        no_invert_depth: bool,
-        /// Enable 3D inpainting for true parallax with occlusion. Requires 'waydeeper download-model inpaint'
-        #[arg(long)]
-        inpaint: bool,
-        /// Disable 3D inpainting mode
-        #[arg(long)]
-        no_inpaint: bool,
     },
 
-    /// Start daemons for configured monitors. If a daemon is already running, it will be skipped. Use `set` to reload with new config, or `stop` first to restart.
+    /// Start daemons for configured monitors.
+    ///
+    /// Skips monitors that are already running. Use `set` to reload a running daemon
+    /// with new settings, or `stop` first to force a fresh start.
     Daemon {
         /// Target monitor name, or omit to start all configured monitors
         #[arg(short, long)]
@@ -185,35 +193,38 @@ enum Commands {
         verbose: bool,
     },
 
+    /// Stop wallpaper daemons.
     Stop {
         /// Monitor name to stop, or omit to stop all
         #[arg(short, long)]
         monitor: Option<String>,
     },
 
-    /// List connected Wayland monitors
+    /// List connected Wayland monitors and their wallpaper status.
     ListMonitors,
 
+    /// Pre-generate depth map and optionally inpaint mesh without starting a daemon.
     Pregenerate {
         /// Path to the wallpaper image
         image: String,
-        /// Enable verbose logging
-        #[arg(short, long)]
-        verbose: bool,
         /// Depth model name or path
         #[arg(long)]
         model: Option<String>,
-        /// Force regenerate depth map
-        #[arg(long)]
-        regenerate: bool,
-        /// Also pre-generate the 3D inpaint mesh
+        /// Enable 3D inpainting for true parallax with occlusion
         #[arg(long)]
         inpaint: bool,
-        /// Invert depth for inpaint mesh generation
+        /// Invert depth interpretation (near ↔ far)
         #[arg(long)]
         invert_depth: bool,
+        /// Force regenerate depth map and inpaint mesh
+        #[arg(long)]
+        regenerate: bool,
+        /// Enable verbose logging
+        #[arg(short, long)]
+        verbose: bool,
     },
 
+    /// Manage the depth map and inpaint mesh cache.
     Cache {
         /// Clear all cached depth maps and meshes
         #[arg(long, group = "action")]
@@ -223,6 +234,7 @@ enum Commands {
         list: bool,
     },
 
+    /// Download ONNX depth models and 3D inpainting networks.
     DownloadModel {
         /// Model to download: 'midas', 'depth-pro-q4', or 'inpaint'
         model: Option<String>,
