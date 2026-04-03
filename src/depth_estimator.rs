@@ -75,7 +75,7 @@ impl DepthEstimator {
         let mut session = ort::session::Session::builder()?
             .commit_from_file(&self.model_path)?;
 
-        eprintln!("Estimating depth...");
+        println!("Estimating depth...");
 
         // Read model input shape to determine layout and input dimensions
         let mut is_5d = false;

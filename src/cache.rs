@@ -182,7 +182,6 @@ impl DepthCache {
     }
 }
 
-#[allow(dead_code)]
 pub fn save_depth_map(depth_data: &[f32], width: u32, height: u32, path: &Path) -> Result<()> {
     let image_buffer: Vec<u16> = depth_data
         .iter()

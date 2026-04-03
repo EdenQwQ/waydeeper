@@ -2,17 +2,20 @@
 
 Depth effect wallpaper for Wayland — GPU-accelerated parallax from ML depth estimation.
 
+Inspired by [lively wallpaper](https://github.com/rocksdanister/lively) for Windows, waydeeper brings its depth effect to Wayland compositors. Built entirely with AI-assisted development.
+
 https://github.com/user-attachments/assets/b5e0ac11-9533-43a7-a0e1-f34e31c7652e
 
 ## Features
 
-- **ML Depth Estimation**: Generates depth maps from any image using pre-trained ONNX models (MiDaS, Depth Pro)
+- **ML Depth Estimation**: Generates depth maps from any image using pre-trained ONNX models (Depth Anything V3, MiDaS, Depth Pro)
 - **GPU-Accelerated**: OpenGL ES 3.0 shaders render the parallax effect at full resolution
 - **3D Inpainting**: True parallax with correct occlusion using ML inpainting (edge/depth/color networks)
 - **Fractional HiDPI**: Exact pixel-perfect scaling via `wp_fractional_scale_v1` + `wp_viewporter`
 - **Lazy Animation**: Only animates when the mouse is active on the background surface, with configurable delay and idle timeout
 - **Smart Caching**: Depth maps cached with blake2b hashing; model-aware cache invalidation
 - **Multi-Monitor**: Independent wallpapers per monitor with separate daemon processes
+- **Background Reload**: Change settings or wallpaper without visible interruption — daemon regenerates assets in the background then swaps in-place
 
 ## Requirements
 
@@ -143,11 +146,11 @@ waydeeper download-model
 
 This prompts you to select from available models:
 
-| Model                        | Description                                            |
-| ---------------------------- | ------------------------------------------------------ |
-| `depth-anything-v3-base` (default) | Balanced quality and speed, good for most use cases |
-| `midas-small`                | Lightweight and fast, lower quality                    |
-| `depth-pro-q4`               | Apple Depth Pro (4-bit quantized) — high quality, slow |
+| Model                              | Description                                            |
+| ---------------------------------- | ------------------------------------------------------ |
+| `depth-anything-v3-base` (default) | Balanced quality and speed, good for most use cases    |
+| `midas-small`                      | Lightweight and fast, lower quality                    |
+| `depth-pro-q4`                     | Apple Depth Pro (4-bit quantized) — high quality, slow |
 
 Models are stored in `~/.local/share/waydeeper/models/`.
 
@@ -182,14 +185,15 @@ pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu 
 waydeeper download-model inpaint
 ```
 
-Downloads three checkpoints to `~/.local/share/waydeeper/inpaint/`:
+Downloads three checkpoints to `~/.local/share/waydeeper/models/inpaint/`:
+
 | File | Purpose |
 | ---------------- | ------------------------------------------ |
 | `edge-model.pth` | Predicts edge patterns around occlusion |
 | `depth-model.pth`| Inpaints depth in synthesised regions |
 | `color-model.pth`| Fills color in synthesised regions |
 
-> **Note:** The ONNX depth model (MiDaS / Depth Pro) generates the _initial_ depth
+> **Note:** The ONNX depth model (Depth Anything V3, MiDaS, Depth Pro) generates the _initial_ depth
 > map from the full image. `depth-model.pth` is a separate network used _only_
 > during 3D inpainting to fill depth in occlusion holes. Both are needed for
 > inpaint mode.
@@ -199,11 +203,14 @@ Downloads three checkpoints to `~/.local/share/waydeeper/inpaint/`:
 ### Set a wallpaper
 
 ```bash
-# Basic usage
+# Basic usage (applies to all connected monitors)
 waydeeper set /path/to/wallpaper.jpg
 
 # On a specific monitor
 waydeeper set /path/to/wallpaper.jpg -m eDP-1
+
+# Omit image to use the configured wallpaper (useful for changing params or regenerating)
+waydeeper set -m eDP-1 --strength 0.05
 
 # With custom settings
 waydeeper set /path/to/wallpaper.jpg \
@@ -216,6 +223,10 @@ waydeeper set /path/to/wallpaper.jpg \
   --idle-timeout 1000 \
   --invert-depth
 ```
+
+If a daemon is already running for the target monitor, it will be reloaded with
+the new settings in the background (no visible interruption). Otherwise a new
+daemon is spawned.
 
 ### Use a specific depth model
 
@@ -252,14 +263,17 @@ waydeeper pregenerate /path/to/wallpaper.jpg --inpaint
 ### Start daemon for all configured monitors
 
 ```bash
-# Start all configured monitors
+# Start all configured monitors (skips already running)
 waydeeper daemon
 
 # Start specific monitor
 waydeeper daemon -m eDP-1
 
-# Override settings
-waydeeper daemon --strength 0.05 --fps 30
+# Force regenerate depth maps and meshes
+waydeeper daemon --regenerate
+
+# Verbose output
+waydeeper daemon --verbose
 ```
 
 ### Stop wallpaper
@@ -307,29 +321,32 @@ Stored in `~/.config/waydeeper/config.json`:
       "strength_x": 0.05,
       "strength_y": 0.05,
       "smooth_animation": true,
-      "animation_speed": 0.02,
+      "animation_speed": 0.05,
       "fps": 60,
       "active_delay_ms": 150,
-      "idle_timeout_ms": 1000,
+      "idle_timeout_ms": 5000,
       "model_path": "~/.local/share/waydeeper/models/depth-anything-v3-base/model.onnx",
-      "invert_depth": false
+      "invert_depth": false,
+      "use_inpaint": false,
+      "inpaint_python": "python3"
     }
   }
 }
 ```
 
-| Option             | Default | Description                                      |
-| ------------------ | ------- | ------------------------------------------------ |
-| `strength_x`       | 0.02    | Parallax strength on X axis                      |
-| `strength_y`       | 0.02    | Parallax strength on Y axis                      |
-| `smooth_animation` | true    | Smooth easing animation                          |
-| `animation_speed`  | 0.02    | Animation speed multiplier                       |
-| `fps`              | 60      | Frame rate (30 or 60)                            |
-| `active_delay_ms`  | 150     | Delay before animation starts after mouse enters |
-| `idle_timeout_ms`  | 500     | Time before animation stops after mouse is idle  |
-| `model_path`       | —       | Path to ONNX model                               |
-| `invert_depth`     | false   | Invert depth interpretation                      |
-| `use_inpaint`      | false   | Enable 3D inpainting mode                        |
+| Option             | Default   | Description                                      |
+| ------------------ | --------- | ------------------------------------------------ |
+| `strength_x`       | 0.02      | Parallax strength on X axis                      |
+| `strength_y`       | 0.02      | Parallax strength on Y axis                      |
+| `smooth_animation` | true      | Smooth easing animation                          |
+| `animation_speed`  | 0.05      | Animation speed multiplier                       |
+| `fps`              | 60        | Frame rate (30 or 60)                            |
+| `active_delay_ms`  | 150       | Delay before animation starts after mouse enters |
+| `idle_timeout_ms`  | 5000      | Time before animation stops after mouse is idle  |
+| `model_path`       | —         | Path to ONNX model                               |
+| `invert_depth`     | false     | Invert depth interpretation                      |
+| `use_inpaint`      | false     | Enable 3D inpainting mode                        |
+| `inpaint_python`   | `python3` | Python interpreter for inpainting subprocess     |
 
 ### Cache
 
@@ -344,16 +361,21 @@ models or inpaint settings produces separate cache entries.
 src/
   main.rs            - Entry point
   cli.rs             - CLI with subprocess-based daemon spawning
+                       set: config update + IPC reload (no asset generation)
+                       daemon: spawn new daemons, skip running
   config.rs          - JSON config management
   models.rs          - Model registry and download URLs
   cache.rs           - Blake2b-hashed depth map + inpaint mesh cache
-  ipc.rs             - Unix domain socket IPC
+  ipc.rs             - Unix domain socket IPC with reload state tracking
   depth_estimator.rs - ONNX inference + Lanczos resize + Gaussian blur
+  daemon.rs          - DepthWallpaperDaemon with background reload state machine
   inpaint.rs         - Python subprocess launcher for 3D inpainting
   mesh.rs            - Binary/ASCII PLY parser with UV + FoV metadata
   math.rs            - Perspective/translation 4×4 matrix helpers
   renderer.rs        - EGL context, GLSL shaders, flat + mesh modes
+                       reload_textures() and reload_mesh() for in-place swap
   wayland.rs         - smithay-client-toolkit layer-shell + fractional scaling
+                       Background reload thread, in-place texture swap
   egl_bridge.c       - C FFI for EGL/Wayland bridge
 scripts/
   inpaint.py         - 3D inpainting pipeline with graph-based mesh generation
@@ -365,8 +387,9 @@ scripts/
 
 Special thanks to:
 
-- [MiDaS model](https://github.com/isl-org/MiDaS) and [Depth Pro](https://github.com/apple/ml-depth-pro) for depth estimation
+- [lively wallpaper](https://github.com/rocksdanister/lively) — this project is inspired by its depth effect wallpaper feature. waydeeper started as a Wayland implementation of that Windows app's depth wallpaper functionality
+- [Depth Anything V3](https://github.com/ByteDance-Seed/depth-anything-3), [MiDaS](https://github.com/isl-org/MiDaS), and [Depth Pro](https://github.com/apple/ml-depth-pro) for depth estimation
 - [3D Photo Inpainting](https://github.com/vt-vl-lab/3d-photo-inpainting) for the mesh inpainting pipeline
-- [rocksdanister](https://github.com/rocksdanister) for [lively](https://github.com/rocksdanister/lively) and [ONNX model weights](https://github.com/rocksdanister/lively-ml-models/releases)
+- [rocksdanister](https://github.com/rocksdanister) for [ONNX model weights](https://github.com/rocksdanister/lively-ml-models/releases)
 - [awww](https://github.com/BC100Dev/awww) for Wayland wallpaper daemon reference
 - [smithay-client-toolkit](https://github.com/Smithay/client-toolkit) for the Wayland client library

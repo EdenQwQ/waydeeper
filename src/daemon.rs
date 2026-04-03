@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::cache::{DepthCache, InpaintCache};
-use crate::config::{self};
+use crate::config;
 use crate::depth_estimator::DepthEstimator;
 use crate::inpaint::{self, InpaintConfig};
 use crate::ipc::{DaemonSocket, ReloadParams, ReloadState};
@@ -13,7 +13,7 @@ use crate::models;
 use crate::renderer;
 
 pub struct DepthWallpaperDaemon {
-    pub config: config::Config,
+    config: config::Config,
     pub depth_estimator: Option<DepthEstimator>,
     cache_manager: Option<DepthCache>,
     inpaint_cache: Option<InpaintCache>,

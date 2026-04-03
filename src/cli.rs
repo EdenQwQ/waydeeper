@@ -255,13 +255,13 @@ enum Commands {
         smooth_animation: bool,
         #[arg(long)]
         no_smooth_animation: bool,
-        #[arg(long, default_value = "0.02")]
+        #[arg(long, default_value = "0.05")]
         animation_speed: f64,
         #[arg(long, default_value = "60")]
         fps: u32,
         #[arg(long, default_value = "150")]
         active_delay: f64,
-        #[arg(long, default_value = "500")]
+        #[arg(long, default_value = "5000")]
         idle_timeout: f64,
         #[arg(long)]
         model: Option<String>,
@@ -597,13 +597,10 @@ fn cmd_set(
         .transpose()?;
 
     // Determine target monitors
-    let config = config::load_config().unwrap_or_default();
     let connected_outputs = wayland::list_connected_outputs();
-    
     let target_monitors: Vec<String> = match monitor {
         Some(name) => vec![name.to_string()],
         None => {
-            // Default to all connected monitors
             if connected_outputs.is_empty() {
                 return Err(anyhow!("No monitors detected. Specify a monitor with -m."));
             }
@@ -616,7 +613,8 @@ fn cmd_set(
     let mut failed = 0;
 
     for monitor_id in &target_monitors {
-        let existing_config = config.monitors.get(monitor_id).cloned();
+        let saved_config = config::load_config().unwrap_or_default();
+        let existing_config = saved_config.monitors.get(monitor_id).cloned();
 
         // Resolve image path for this monitor
         let img_path = match &image_path_string {
@@ -634,11 +632,28 @@ fn cmd_set(
         };
 
         // Resolve animation params for this monitor
-        let mon_config = config.monitors.get(monitor_id).cloned().unwrap_or_default();
+        let mon_config = existing_config.unwrap_or_default();
         let resolved_params = animation_params.resolve(&mon_config);
 
         // Resolve model for this monitor
         let eff_model = model_path.as_deref().or(mon_config.model_path.as_deref());
+
+        // Resolve boolean flags: use explicit values if given, otherwise fall back to existing config
+        let do_invert_depth = if invert_depth {
+            true
+        } else if no_invert_depth {
+            false
+        } else {
+            mon_config.invert_depth
+        };
+        let do_use_inpaint = if use_inpaint {
+            true
+        } else if no_inpaint {
+            false
+        } else {
+            mon_config.use_inpaint
+        };
+        let inpaint_python = &mon_config.inpaint_python;
 
         // Update config with only explicitly provided parameters
         {
@@ -656,13 +671,12 @@ fn cmd_set(
             if let Some(strength) = animation_params.strength {
                 monitor_config.strength_x = strength;
                 monitor_config.strength_y = strength;
-            } else {
-                if animation_params.strength_x.is_some() {
-                    monitor_config.strength_x = animation_params.strength_x.unwrap();
-                }
-                if animation_params.strength_y.is_some() {
-                    monitor_config.strength_y = animation_params.strength_y.unwrap();
-                }
+            }
+            if let Some(sx) = animation_params.strength_x {
+                monitor_config.strength_x = sx;
+            }
+            if let Some(sy) = animation_params.strength_y {
+                monitor_config.strength_y = sy;
             }
 
             if animation_params.smooth_animation {
@@ -712,9 +726,9 @@ fn cmd_set(
                     &resolved_params,
                     eff_model,
                     regenerate,
-                    mon_config.invert_depth,
-                    mon_config.use_inpaint,
-                    &mon_config.inpaint_python,
+                    do_invert_depth,
+                    do_use_inpaint,
+                    inpaint_python,
                 )?;
                 println!("Wallpaper daemon reloaded for monitor {}.", monitor_id);
                 reloaded += 1;
@@ -730,9 +744,9 @@ fn cmd_set(
             &resolved_params,
             eff_model,
             regenerate,
-            mon_config.invert_depth,
-            mon_config.use_inpaint,
-            &mon_config.inpaint_python,
+            do_invert_depth,
+            do_use_inpaint,
+            inpaint_python,
             false,
         )?;
 

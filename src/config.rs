@@ -11,7 +11,7 @@ pub struct MonitorConfig {
     pub strength_x: f64,
     #[serde(default = "default_strength")]
     pub strength_y: f64,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_smooth_animation")]
     pub smooth_animation: bool,
     #[serde(default = "default_animation_speed")]
     pub animation_speed: f64,
@@ -38,10 +38,10 @@ impl Default for MonitorConfig {
             strength_x: 0.02,
             strength_y: 0.02,
             smooth_animation: true,
-            animation_speed: 0.02,
+            animation_speed: 0.05,
             fps: 60,
             active_delay_ms: 150.0,
-            idle_timeout_ms: 500.0,
+            idle_timeout_ms: 5000.0,
             model_path: None,
             invert_depth: false,
             use_inpaint: false,
@@ -51,11 +51,11 @@ impl Default for MonitorConfig {
 }
 
 fn default_strength() -> f64 { 0.02 }
-fn default_true() -> bool { true }
-fn default_animation_speed() -> f64 { 0.02 }
+fn default_smooth_animation() -> bool { true }
+fn default_animation_speed() -> f64 { 0.05 }
 fn default_fps() -> u32 { 60 }
 fn default_active_delay() -> f64 { 150.0 }
-fn default_idle_timeout() -> f64 { 500.0 }
+fn default_idle_timeout() -> f64 { 5000.0 }
 fn default_python() -> String { "python3".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,8 +65,6 @@ pub struct Config {
     pub monitors: HashMap<String, MonitorConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_directory: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_path: Option<String>,
 }
 
 
@@ -113,14 +111,8 @@ pub fn save_config(config: &Config) -> Result<()> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir)?;
 
-    let clean = Config {
-        monitors: config.monitors.clone(),
-        cache_directory: config.cache_directory.clone(),
-        model_path: config.model_path.clone(),
-    };
-
     let path = config_file();
-    let content = serde_json::to_string_pretty(&clean)?;
+    let content = serde_json::to_string_pretty(config)?;
     std::fs::write(&path, content)
         .with_context(|| format!("Failed to write config to {}", path.display()))?;
     Ok(())
