@@ -462,7 +462,7 @@ impl EglRenderer {
     // Mouse update (shared)
     // -----------------------------------------------------------------------
 
-    pub fn update_mouse(&mut self) {
+    pub fn update_mouse(&mut self, delta_seconds: f64) {
         let now = std::time::Instant::now();
         let mouse = &mut self.mouse;
 
@@ -492,17 +492,14 @@ impl EglRenderer {
         }
 
         if mouse.is_animating {
-            let lerp = if self.config.smooth_animation {
-                0.02 + self.config.animation_speed * 0.28
-            } else {
-                1.0
-            };
+            let lerp_per_second = self.config.animation_speed;
+            let lerp = 1.0 - (-lerp_per_second * delta_seconds).exp();
             mouse.current_x += (mouse.mouse_x - mouse.current_x) * lerp;
             mouse.current_y += (mouse.mouse_y - mouse.current_y) * lerp;
         }
 
         if !mouse.mouse_in_window {
-            let lerp = 0.05;
+            let lerp = 1.0 - (-3.0 * delta_seconds).exp();
             mouse.current_x += (0.5 - mouse.current_x) * lerp;
             mouse.current_y += (0.5 - mouse.current_y) * lerp;
             mouse.is_animating = false;

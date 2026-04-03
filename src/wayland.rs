@@ -194,6 +194,7 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
     app.fractional_scale = fractional_scale;
 
     let frame_duration = Duration::from_millis(1000 / fps);
+    let mut last_time = std::time::Instant::now();
     loop {
         if !running.load(Ordering::SeqCst) {
             log::info!("renderer: exiting");
@@ -263,13 +264,30 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
         let _ = event_queue.flush();
 
         if let Some(guard) = event_queue.prepare_read() {
-            if guard.read().is_ok() {
-                let _ = event_queue.dispatch_pending(&mut app);
+            let fd = guard.connection_fd();
+            let mut poll_fds = [nix::poll::PollFd::new(
+                fd,
+                nix::poll::PollFlags::POLLIN,
+            )];
+            let timeout_ms: u16 = std::cmp::min(500, frame_duration.as_millis() as u16);
+            match nix::poll::poll(&mut poll_fds, timeout_ms) {
+                Ok(0) => {}
+                Ok(_) => {
+                    if guard.read().is_ok() {
+                        let _ = event_queue.dispatch_pending(&mut app);
+                    }
+                }
+                Err(_) => {}
             }
+        } else {
+            std::thread::sleep(frame_duration);
         }
 
         if !app.first_configure {
-            app.renderer.update_mouse();
+            let now = std::time::Instant::now();
+            let delta = now.duration_since(last_time).as_secs_f64();
+            last_time = now;
+            app.renderer.update_mouse(delta);
             let _ = app.renderer.draw();
             app.frame_counter += 1;
         }
