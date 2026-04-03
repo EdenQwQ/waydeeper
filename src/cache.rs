@@ -62,6 +62,7 @@ impl DepthCache {
         &self,
         image_path: &Path,
         model_name: &str,
+        model_path: &str,
     ) -> Result<Option<Vec<f32>>> {
         if !image_path.exists() {
             return Ok(None);
@@ -104,7 +105,7 @@ impl DepthCache {
         }
 
         let depth_map = load_depth_map(&depth_path)?;
-        log::debug!("Cache hit for {:?} (model: {})", image_path, model_name);
+        log::debug!("Cache hit for {:?} (model: {})", image_path, model_path);
         Ok(Some(depth_map))
     }
 
@@ -116,6 +117,7 @@ impl DepthCache {
         width: u32,
         height: u32,
         model_name: &str,
+        model_path: &str,
     ) -> Result<()> {
         let image_hash = self.compute_image_hash(image_path, model_name)?;
         let depth_path = self.get_depth_file_path(&image_hash);
@@ -144,7 +146,7 @@ impl DepthCache {
         log::debug!(
             "Cached depth map for {:?} (model: {})",
             image_path,
-            model_name
+            model_path
         );
         Ok(())
     }

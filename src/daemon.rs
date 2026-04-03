@@ -87,8 +87,9 @@ impl DepthWallpaperDaemon {
         let cache = self.cache_manager.as_ref().unwrap();
 
         if !force_regenerate {
+            let display_path = model_path.unwrap_or("auto");
             if let Ok(Some(_cached)) =
-                cache.get_cached_depth(std::path::Path::new(image_path), &model_name)
+                cache.get_cached_depth(std::path::Path::new(image_path), &model_name, display_path)
             {
                 let hash = cache.compute_image_hash(std::path::Path::new(image_path), &model_name)?;
                 let depth_path = cache.get_depth_file_path(&hash);

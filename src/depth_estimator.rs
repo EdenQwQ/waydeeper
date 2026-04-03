@@ -229,7 +229,7 @@ impl DepthEstimator {
         let path = Path::new(image_path);
 
         if !force_regenerate {
-            if let Some(cached) = cache.get_cached_depth(path, &self.model_name)? {
+            if let Some(cached) = cache.get_cached_depth(path, &self.model_name, &self.model_path)? {
                 return Ok(cached);
             }
         }
@@ -240,7 +240,7 @@ impl DepthEstimator {
         let width = image.width();
         let height = image.height();
 
-        cache.cache_depth(path, &depth, width, height, &self.model_name)?;
+        cache.cache_depth(path, &depth, width, height, &self.model_name, &self.model_path)?;
         Ok(depth)
     }
 }
