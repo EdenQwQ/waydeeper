@@ -32,7 +32,7 @@ use wayland_protocols::wp::{
 
 use crate::daemon::DepthWallpaperDaemon;
 use crate::ipc::{ReloadParams, ReloadResult, ReloadState};
-use crate::renderer::{EglRenderer, RendererConfig};
+use crate::renderer::{EglRenderer, PendingReload, RendererConfig};
 
 pub struct App {
     registry_state: RegistryState,
@@ -195,6 +195,8 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
 
     let frame_duration = Duration::from_millis(1000 / fps);
     let mut last_time = std::time::Instant::now();
+    let preparing_reload: std::sync::Arc<std::sync::Mutex<Option<PendingReload>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
     loop {
         if !running.load(Ordering::SeqCst) {
             log::info!("renderer: exiting");
@@ -214,7 +216,7 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
                     Ok(reload_result) => {
                         let mut guard = reload_state_clone.result.lock().unwrap();
                         *guard = Some(reload_result);
-                        reload_state_clone.push_log("Assets ready, swapping...".to_string());
+                        reload_state_clone.push_log("Assets ready, preparing textures...".to_string());
                         reload_state_clone.ready.store(true, Ordering::SeqCst);
                     }
                     Err(e) => {
@@ -225,39 +227,75 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
             });
         }
 
-        // Check if reload assets are ready — swap in-place
+        // Check if reload assets are ready — prepare textures in background (no transition yet)
         if reload_state.ready.swap(false, Ordering::SeqCst) {
             if let Some(result) = reload_state.result.lock().unwrap().take() {
-                log::info!("Reload assets ready, swapping in-place...");
-                if let Err(e) = app.renderer.reload_textures(&result.wallpaper_path, &result.depth_path) {
-                    log::warn!("Texture reload failed: {}", e);
-                }
-                if result.use_inpaint {
-                    if let Some(ref ply_path) = result.ply_path {
-                        if let Err(e) = app.renderer.reload_mesh(ply_path) {
-                            log::warn!("Mesh reload failed, falling back to flat mode: {}", e);
-                            app.renderer.config.ply_path = None;
-                        } else {
-                            app.renderer.config.ply_path = Some(ply_path.clone());
+                log::info!("Reload assets ready, preparing textures in background...");
+                // Prepare textures and mesh in background thread (image decode is slow)
+                let preparing = preparing_reload.clone();
+                std::thread::spawn(move || {
+                    let wallpaper_result = EglRenderer::prepare_reload_textures(
+                        &result.wallpaper_path,
+                        &result.depth_path,
+                    );
+                    match wallpaper_result {
+                        Ok((wallpaper, depth)) => {
+                            let ply_data = if result.use_inpaint {
+                                if let Some(ref ply_path) = result.ply_path {
+                                    match EglRenderer::prepare_reload_mesh(ply_path) {
+                                        Ok(p) => Some(p),
+                                        Err(e) => {
+                                            log::warn!("Mesh prepare failed: {}", e);
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                            let pending = PendingReload {
+                                wallpaper,
+                                depth,
+                                ply_path: result.ply_path,
+                                ply_data,
+                                strength_x: result.strength_x,
+                                strength_y: result.strength_y,
+                                smooth_animation: result.smooth_animation,
+                                animation_speed: result.animation_speed,
+                                fps: result.fps,
+                                active_delay_ms: result.active_delay_ms,
+                                idle_timeout_ms: result.idle_timeout_ms,
+                                invert_depth: result.invert_depth,
+                                use_inpaint: result.use_inpaint,
+                            };
+                            *preparing.lock().unwrap() = Some(pending);
                         }
-                    } else {
-                        app.renderer.config.ply_path = None;
+                        Err(e) => {
+                            log::warn!("Texture prepare failed: {}", e);
+                        }
                     }
-                } else {
-                    app.renderer.config.ply_path = None;
-                }
-                app.renderer.config.strength_x = result.strength_x;
-                app.renderer.config.strength_y = result.strength_y;
-                app.renderer.config.smooth_animation = result.smooth_animation;
-                app.renderer.config.animation_speed = result.animation_speed;
-                app.renderer.config.fps = result.fps;
-                app.renderer.config.active_delay_ms = result.active_delay_ms;
-                app.renderer.config.idle_timeout_ms = result.idle_timeout_ms;
-                app.renderer.config.invert_depth = result.invert_depth;
+                });
+            }
+        }
+
+        // Check if background texture preparation is done — capture old wallpaper, upload new, transition
+        if let Some(pending) = preparing_reload.lock().unwrap().take() {
+            // Capture current frame (old wallpaper) right before the swap
+            if let Err(e) = app.renderer.start_transition() {
+                log::warn!("Transition start failed: {}", e);
+            }
+            // Upload new textures (fast GPU operation)
+            app.renderer.set_pending_reload(pending);
+            if let Err(e) = app.renderer.try_apply_pending_reload() {
+                log::warn!("Failed to apply pending reload: {}", e);
+            } else {
                 reload_state.push_log("Reload complete, wallpaper updated seamlessly".to_string());
                 reload_state.mark_reload_complete();
+                reload_state.generating.store(false, Ordering::SeqCst);
             }
-            reload_state.generating.store(false, Ordering::SeqCst);
         }
 
         let _ = event_queue.dispatch_pending(&mut app);
@@ -288,7 +326,12 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
             let delta = now.duration_since(last_time).as_secs_f64();
             last_time = now;
             app.renderer.update_mouse(delta);
+            app.renderer.update_transition(delta);
+            app.renderer.update_fade(delta);
             let _ = app.renderer.draw();
+            let _ = app.renderer.draw_transition_overlay();
+            let _ = app.renderer.draw_fade();
+            app.renderer.swap_buffers();
             app.frame_counter += 1;
         }
 
@@ -490,6 +533,7 @@ impl LayerShellHandler for App {
                     self.renderer.config.ply_path = None;
                 }
             }
+            self.renderer.start_fade();
         } else {
             self.renderer.resize(physical_width, physical_height);
         }

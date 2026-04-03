@@ -104,25 +104,68 @@ pub struct EglRenderer {
     mesh_uv_vbo: Option<glow::Buffer>,
     mesh_ebo: Option<glow::Buffer>,
     mesh_index_count: u32,
-    /// Whether the loaded PLY has per-vertex UVs (new format).
     mesh_has_uvs: bool,
-    /// Camera Z offset (always 0 — mesh is already in camera space).
     mesh_camera_z: f32,
-    /// Absolute Z of the nearest mesh face.  Used to bound parallax travel so
-    /// near-field pixels never shift more than a small fraction of screen width.
     mesh_near_z: f32,
-    /// Mesh XY half-extent (kept for logging; no longer used for travel).
     mesh_xy_half: f32,
-    /// Intrinsic vertical FoV baked into the mesh (read from PLY comment).
     mesh_fov_y_deg: f32,
-    /// Source image W/H aspect ratio (read from PLY comment).
-    /// Used to compute the cover FoV when screen aspect ≠ image aspect.
     mesh_image_aspect: f32,
 
     screen_width: u32,
     screen_height: u32,
     pub config: RendererConfig,
     pub mouse: MouseState,
+
+    // --- Transition state ---
+    transition_old_wallpaper: Option<glow::Texture>,
+    transition_progress: f64,
+    transition_active: bool,
+    transition_shader: Option<glow::Program>,
+    transition_vao: Option<glow::VertexArray>,
+    transition_vbo: Option<glow::Buffer>,
+    transition_ebo: Option<glow::Buffer>,
+    transition_center_x: f32,
+    transition_center_y: f32,
+
+    // --- Fade-in state (initial daemon startup) ---
+    fade_active: bool,
+    fade_progress: f64,
+    fade_shader: Option<glow::Program>,
+    fade_vao: Option<glow::VertexArray>,
+    fade_vbo: Option<glow::Buffer>,
+    fade_ebo: Option<glow::Buffer>,
+
+    // --- Pending reload (background-prepared data, applied on render thread) ---
+    pending_reload: Option<PendingReload>,
+}
+
+pub struct PendingReload {
+    pub wallpaper: image::RgbaImage,
+    pub depth: image::GrayImage,
+    pub ply_path: Option<String>,
+    pub ply_data: Option<PlyPrepared>,
+    pub strength_x: f64,
+    pub strength_y: f64,
+    pub smooth_animation: bool,
+    pub animation_speed: f64,
+    pub fps: u32,
+    pub active_delay_ms: f64,
+    pub idle_timeout_ms: f64,
+    pub invert_depth: bool,
+    pub use_inpaint: bool,
+}
+
+pub struct PlyPrepared {
+    pub positions: Vec<f32>,
+    pub colors: Vec<u8>,
+    pub uvs: Vec<f32>,
+    pub indices: Vec<u32>,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    pub has_uvs: bool,
+    pub aabb: [f32; 6],
+    pub fov_y_deg: f32,
+    pub image_aspect: f32,
 }
 
 impl EglRenderer {
@@ -167,6 +210,25 @@ impl EglRenderer {
             screen_height: 1,
             config,
             mouse: MouseState::default(),
+
+            transition_old_wallpaper: None,
+            transition_progress: 0.0,
+            transition_active: false,
+            transition_shader: None,
+            transition_vao: None,
+            transition_vbo: None,
+            transition_ebo: None,
+            transition_center_x: 0.5,
+            transition_center_y: 0.5,
+
+            fade_active: false,
+            fade_progress: 0.0,
+            fade_shader: None,
+            fade_vao: None,
+            fade_vbo: None,
+            fade_ebo: None,
+
+            pending_reload: None,
         })
     }
 
@@ -201,14 +263,15 @@ impl EglRenderer {
         log::info!("EGL surface created {}x{}", width, height);
 
         if self.config.ply_path.is_some() {
-            // Initialise both mesh AND flat resources.
-            // The flat quad is drawn first as a background layer so that holes
-            // left by back-face culling show the original image rather than black.
             self.init_gl_flat()?;
-            self.init_gl_mesh()
+            self.init_gl_mesh()?;
         } else {
-            self.init_gl_flat()
+            self.init_gl_flat()?;
         }
+        self.init_gl_transition()?;
+        self.init_gl_fade()?;
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -291,7 +354,462 @@ impl EglRenderer {
     }
 
     // -----------------------------------------------------------------------
-    // Load textures (flat mode)
+    // Transition overlay init
+    // -----------------------------------------------------------------------
+
+    fn init_gl_transition(&mut self) -> Result<()> {
+        let gl = self.gl_context.as_ref().unwrap();
+        unsafe {
+            let program = compile_program(gl, TRANSITION_VERT, TRANSITION_FRAG)?;
+            self.transition_shader = Some(program);
+
+            #[rustfmt::skip]
+            let vertices: [f32; 16] = [
+                -1.0, -1.0, 0.0, 0.0,
+                 1.0, -1.0, 1.0, 0.0,
+                 1.0,  1.0, 1.0, 1.0,
+                -1.0,  1.0, 0.0, 1.0,
+            ];
+            let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+            let vao = gl.create_vertex_array().map_err(gl_error)?;
+            gl.bind_vertex_array(Some(vao));
+
+            let vbo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&vertices),
+                glow::STATIC_DRAW,
+            );
+
+            let ebo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
+            gl.buffer_data_u8_slice(
+                glow::ELEMENT_ARRAY_BUFFER,
+                bytemuck::cast_slice(&indices),
+                glow::STATIC_DRAW,
+            );
+
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 16, 0);
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 16, 8);
+            gl.enable_vertex_attrib_array(1);
+            gl.bind_vertex_array(None);
+
+            self.transition_vao = Some(vao);
+            self.transition_vbo = Some(vbo);
+            self.transition_ebo = Some(ebo);
+        }
+        log::info!("Transition GL resources initialized");
+        Ok(())
+    }
+
+    fn init_gl_fade(&mut self) -> Result<()> {
+        let gl = self.gl_context.as_ref().unwrap();
+        unsafe {
+            let program = compile_program(gl, FADE_VERT, FADE_FRAG)?;
+            self.fade_shader = Some(program);
+
+            #[rustfmt::skip]
+            let vertices: [f32; 16] = [
+                -1.0, -1.0, 0.0, 0.0,
+                 1.0, -1.0, 1.0, 0.0,
+                 1.0,  1.0, 1.0, 1.0,
+                -1.0,  1.0, 0.0, 1.0,
+            ];
+            let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+            let vao = gl.create_vertex_array().map_err(gl_error)?;
+            gl.bind_vertex_array(Some(vao));
+
+            let vbo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&vertices),
+                glow::STATIC_DRAW,
+            );
+
+            let ebo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
+            gl.buffer_data_u8_slice(
+                glow::ELEMENT_ARRAY_BUFFER,
+                bytemuck::cast_slice(&indices),
+                glow::STATIC_DRAW,
+            );
+
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 16, 0);
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 16, 8);
+            gl.enable_vertex_attrib_array(1);
+            gl.bind_vertex_array(None);
+
+            self.fade_vao = Some(vao);
+            self.fade_vbo = Some(vbo);
+            self.fade_ebo = Some(ebo);
+        }
+        log::info!("Fade GL resources initialized");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Start transition (snapshot current state before reload)
+    // -----------------------------------------------------------------------
+
+    pub fn start_transition(&mut self) -> Result<()> {
+        let gl = self.gl_context.as_ref().ok_or_else(|| anyhow!("no GL"))?;
+
+        // Clean up any previous transition texture
+        unsafe {
+            if let Some(old) = self.transition_old_wallpaper.take() {
+                gl.delete_texture(old);
+            }
+        }
+
+        // Copy current framebuffer (which has the current wallpaper rendered) into a texture.
+        // This captures the wallpaper WITH parallax already applied, so the transition shader
+        // just needs to display it with a circle mask — no additional parallax needed.
+        unsafe {
+            let tex = gl.create_texture().map_err(gl_error)?;
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            set_texture_params(gl);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                self.screen_width as i32,
+                self.screen_height as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                None,
+            );
+            gl.copy_tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0, 0,
+                0, 0,
+                self.screen_width as i32,
+                self.screen_height as i32,
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            self.transition_old_wallpaper = Some(tex);
+        }
+
+        // Set circle center: cursor position if active, otherwise screen center
+        if self.mouse.mouse_in_window && self.mouse.is_animating {
+            self.transition_center_x = self.mouse.current_x as f32;
+            // Flip Y: mouse y=0 is top, shader uv y=0 is bottom
+            self.transition_center_y = (1.0 - self.mouse.current_y) as f32;
+        } else {
+            self.transition_center_x = 0.5;
+            self.transition_center_y = 0.5;
+        }
+
+        self.transition_progress = 0.0;
+        self.transition_active = true;
+
+        log::info!("Transition started at ({:.2}, {:.2})", self.transition_center_x, self.transition_center_y);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Fade-in (initial daemon startup)
+    // -----------------------------------------------------------------------
+
+    pub fn start_fade(&mut self) {
+        self.fade_progress = 0.0;
+        self.fade_active = true;
+        log::info!("Fade-in started");
+    }
+
+    pub fn update_fade(&mut self, delta_seconds: f64) {
+        if !self.fade_active {
+            return;
+        }
+        self.fade_progress += delta_seconds / 1.0;
+        if self.fade_progress >= 1.0 {
+            self.fade_progress = 1.0;
+            self.fade_active = false;
+        }
+    }
+
+    pub fn draw_fade(&self) -> Result<()> {
+        if !self.fade_active {
+            return Ok(());
+        }
+        let gl = match &self.gl_context { Some(c) => c, None => return Ok(()) };
+        let program = match self.fade_shader { Some(p) => p, None => return Ok(()) };
+
+        let t = self.fade_progress as f32;
+        let alpha = 1.0 - t * t; // ease-in fade: starts opaque, fades quickly at end
+
+        unsafe {
+            gl.disable(glow::DEPTH_TEST);
+            gl.depth_mask(false);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.viewport(0, 0, self.screen_width as i32, self.screen_height as i32);
+            gl.use_program(Some(program));
+
+            gl.uniform_1_f32(gl.get_uniform_location(program, "u_alpha").as_ref(), alpha);
+
+            if let Some(vao) = self.fade_vao {
+                gl.bind_vertex_array(Some(vao));
+                gl.draw_elements(glow::TRIANGLES, 6, glow::UNSIGNED_INT, 0);
+                gl.bind_vertex_array(None);
+            }
+
+            gl.disable(glow::BLEND);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_mask(true);
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Background-safe image preparation (no GPU, can run on any thread)
+    // -----------------------------------------------------------------------
+
+    pub fn prepare_reload_textures(
+        wallpaper_path: &str,
+        depth_path: &str,
+    ) -> Result<(image::RgbaImage, image::GrayImage)> {
+        let wallpaper_raw = image::open(wallpaper_path)?.to_rgba8();
+        let depth_raw = image::open(depth_path)?.to_luma8();
+
+        let mut wallpaper = wallpaper_raw;
+        image::imageops::flip_vertical_in_place(&mut wallpaper);
+        let mut depth = depth_raw;
+        image::imageops::flip_vertical_in_place(&mut depth);
+
+        log::info!(
+            "Prepared textures: wallpaper {}x{}, depth {}x{}",
+            wallpaper.width(),
+            wallpaper.height(),
+            depth.width(),
+            depth.height()
+        );
+
+        Ok((wallpaper, depth))
+    }
+
+    pub fn prepare_reload_mesh(ply_path: &str) -> Result<PlyPrepared> {
+        let mesh = Mesh::load_ply(std::path::Path::new(ply_path))?;
+        log::info!(
+            "Prepared mesh: {} verts, depth_range={:.3}, fov_y={:.2}°, image_aspect={:.4}",
+            mesh.vertex_count,
+            mesh.depth_range(),
+            mesh.fov_y_deg,
+            mesh.image_aspect
+        );
+        Ok(PlyPrepared {
+            positions: mesh.positions,
+            colors: mesh.colors,
+            uvs: mesh.uvs,
+            indices: mesh.indices,
+            vertex_count: mesh.vertex_count as usize,
+            triangle_count: mesh.triangle_count as usize,
+            has_uvs: mesh.has_uvs,
+            aabb: mesh.aabb,
+            fov_y_deg: mesh.fov_y_deg,
+            image_aspect: mesh.image_aspect,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Set pending reload data (called from background thread result)
+    // -----------------------------------------------------------------------
+
+    pub fn set_pending_reload(&mut self, pending: PendingReload) {
+        self.pending_reload = Some(pending);
+    }
+
+    // -----------------------------------------------------------------------
+    // Apply pending reload on render thread (GPU upload, fast)
+    // -----------------------------------------------------------------------
+
+    pub fn try_apply_pending_reload(&mut self) -> Result<bool> {
+        let pending = match self.pending_reload.take() {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+
+        if self.gl_context.is_none() {
+            return Err(anyhow!("no GL"));
+        }
+        let wallpaper = pending.wallpaper;
+        let depth = pending.depth;
+
+        self.image_width = wallpaper.width();
+        self.image_height = wallpaper.height();
+
+        log::info!(
+            "Uploading textures: wallpaper {}x{}, depth {}x{}",
+            self.image_width,
+            self.image_height,
+            depth.width(),
+            depth.height()
+        );
+
+        unsafe {
+            let gl = self.gl_context.as_ref().unwrap();
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+
+            if let Some(old_tex) = self.wallpaper_texture.take() {
+                gl.delete_texture(old_tex);
+            }
+            if let Some(old_tex) = self.depth_texture.take() {
+                gl.delete_texture(old_tex);
+            }
+
+            let wallpaper_tex = gl.create_texture().map_err(gl_error)?;
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(wallpaper_tex));
+            set_texture_params(gl);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                self.image_width as i32,
+                self.image_height as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                Some(&wallpaper),
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            self.wallpaper_texture = Some(wallpaper_tex);
+
+            let depth_tex = gl.create_texture().map_err(gl_error)?;
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(depth_tex));
+            set_texture_params(gl);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::R8 as i32,
+                depth.width() as i32,
+                depth.height() as i32,
+                0,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+                Some(depth.as_raw()),
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            self.depth_texture = Some(depth_tex);
+        }
+
+        // Upload mesh if prepared
+        if let Some(ply) = pending.ply_data {
+            // Use raw pointer to avoid borrow conflict between self.gl_context and self.upload_prepared_mesh
+            let gl_ptr = self.gl_context.as_ref().unwrap() as *const glow::Context;
+            self.upload_prepared_mesh(unsafe { &*gl_ptr }, ply)?;
+        }
+
+        // Update config
+        self.config.strength_x = pending.strength_x;
+        self.config.strength_y = pending.strength_y;
+        self.config.smooth_animation = pending.smooth_animation;
+        self.config.animation_speed = pending.animation_speed;
+        self.config.fps = pending.fps;
+        self.config.active_delay_ms = pending.active_delay_ms;
+        self.config.idle_timeout_ms = pending.idle_timeout_ms;
+        self.config.invert_depth = pending.invert_depth;
+        if pending.use_inpaint {
+            if let Some(ref ply_path) = pending.ply_path {
+                self.config.ply_path = Some(ply_path.clone());
+            }
+        } else {
+            self.config.ply_path = None;
+        }
+
+        log::info!("Pending reload applied");
+        Ok(true)
+    }
+
+    fn upload_prepared_mesh(&mut self, gl: &glow::Context, ply: PlyPrepared) -> Result<()> {
+        self.mesh_camera_z = 0.0;
+        self.mesh_near_z = ply.aabb[5].abs().max(0.1);
+        self.mesh_fov_y_deg = ply.fov_y_deg;
+        self.mesh_image_aspect = ply.image_aspect.max(0.01);
+        self.mesh_index_count = ply.indices.len() as u32;
+        self.mesh_has_uvs = ply.has_uvs;
+
+        unsafe {
+            if let Some(old) = self.mesh_vao.take() { gl.delete_vertex_array(old); }
+            if let Some(old) = self.mesh_pos_vbo.take() { gl.delete_buffer(old); }
+            if let Some(old) = self.mesh_col_vbo.take() { gl.delete_buffer(old); }
+            if let Some(old) = self.mesh_uv_vbo.take() { gl.delete_buffer(old); }
+            if let Some(old) = self.mesh_ebo.take() { gl.delete_buffer(old); }
+
+            let vao = gl.create_vertex_array().map_err(gl_error)?;
+            gl.bind_vertex_array(Some(vao));
+
+            let pos_vbo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(pos_vbo));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&ply.positions),
+                glow::STATIC_DRAW,
+            );
+            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
+            gl.enable_vertex_attrib_array(0);
+
+            let col_vbo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(col_vbo));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                &ply.colors,
+                glow::STATIC_DRAW,
+            );
+            gl.vertex_attrib_pointer_f32(1, 4, glow::UNSIGNED_BYTE, true, 4, 0);
+            gl.enable_vertex_attrib_array(1);
+
+            let uv_vbo = if ply.has_uvs && !ply.uvs.is_empty() {
+                let vbo = gl.create_buffer().map_err(gl_error)?;
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+                gl.buffer_data_u8_slice(
+                    glow::ARRAY_BUFFER,
+                    bytemuck::cast_slice(&ply.uvs),
+                    glow::STATIC_DRAW,
+                );
+                gl.vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, 8, 0);
+                gl.enable_vertex_attrib_array(2);
+                Some(vbo)
+            } else {
+                None
+            };
+
+            let ebo = gl.create_buffer().map_err(gl_error)?;
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
+            gl.buffer_data_u8_slice(
+                glow::ELEMENT_ARRAY_BUFFER,
+                bytemuck::cast_slice(&ply.indices),
+                glow::STATIC_DRAW,
+            );
+
+            gl.bind_vertex_array(None);
+
+            self.mesh_vao = Some(vao);
+            self.mesh_pos_vbo = Some(pos_vbo);
+            self.mesh_col_vbo = Some(col_vbo);
+            self.mesh_uv_vbo = uv_vbo;
+            self.mesh_ebo = Some(ebo);
+        }
+
+        log::info!(
+            "Mesh uploaded: {} vertices, {} triangles",
+            ply.vertex_count,
+            ply.triangle_count
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Load textures (flat mode) — initial load, blocks render loop
     // -----------------------------------------------------------------------
 
     pub fn load_textures(&mut self) -> Result<()> {
@@ -593,7 +1111,6 @@ impl EglRenderer {
             gl.draw_elements(glow::TRIANGLES, 6, glow::UNSIGNED_INT, 0);
             gl.bind_vertex_array(None);
         }
-        unsafe { egl_swap_buffers(&self.egl_context, self.egl_surface); }
         Ok(())
     }
 
@@ -746,7 +1263,6 @@ impl EglRenderer {
             gl.draw_elements(glow::TRIANGLES, self.mesh_index_count as i32, glow::UNSIGNED_INT, 0);
             gl.bind_vertex_array(None);
         }
-        unsafe { egl_swap_buffers(&self.egl_context, self.egl_surface); }
         Ok(())
     }
 
@@ -755,162 +1271,68 @@ impl EglRenderer {
         self.screen_height = height.max(1);
     }
 
-    pub fn reload_textures(&mut self, wallpaper_path: &str, depth_path: &str) -> Result<()> {
-        let gl = self.gl_context.as_ref().ok_or_else(|| anyhow!("no GL"))?;
-        let wallpaper_raw = image::open(wallpaper_path)?.to_rgba8();
-        self.image_width = wallpaper_raw.width();
-        self.image_height = wallpaper_raw.height();
-        let depth_raw = image::open(depth_path)?.to_luma8();
-
-        let mut wallpaper = wallpaper_raw;
-        image::imageops::flip_vertical_in_place(&mut wallpaper);
-        let mut depth = depth_raw;
-        image::imageops::flip_vertical_in_place(&mut depth);
-
-        log::info!(
-            "Reload textures: wallpaper {}x{}, depth {}x{}",
-            self.image_width,
-            self.image_height,
-            depth.width(),
-            depth.height()
-        );
-
-        unsafe {
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-
-            if let Some(old_tex) = self.wallpaper_texture.take() {
-                gl.delete_texture(old_tex);
-            }
-            if let Some(old_tex) = self.depth_texture.take() {
-                gl.delete_texture(old_tex);
-            }
-
-            let wallpaper_tex = gl.create_texture().map_err(gl_error)?;
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(wallpaper_tex));
-            set_texture_params(gl);
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA as i32,
-                self.image_width as i32,
-                self.image_height as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                Some(&wallpaper),
-            );
-            gl.generate_mipmap(glow::TEXTURE_2D);
-            self.wallpaper_texture = Some(wallpaper_tex);
-
-            let depth_tex = gl.create_texture().map_err(gl_error)?;
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(depth_tex));
-            set_texture_params(gl);
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::R8 as i32,
-                depth.width() as i32,
-                depth.height() as i32,
-                0,
-                glow::RED,
-                glow::UNSIGNED_BYTE,
-                Some(depth.as_raw()),
-            );
-            gl.generate_mipmap(glow::TEXTURE_2D);
-            self.depth_texture = Some(depth_tex);
-        }
-        log::info!("Textures reloaded");
-        Ok(())
+    pub fn swap_buffers(&self) {
+        unsafe { egl_swap_buffers(&self.egl_context, self.egl_surface); }
     }
 
-    pub fn reload_mesh(&mut self, ply_path: &str) -> Result<()> {
-        let gl = self.gl_context.as_ref().ok_or_else(|| anyhow!("no GL"))?;
+    pub fn update_transition(&mut self, delta_seconds: f64) {
+        if !self.transition_active {
+            return;
+        }
+        self.transition_progress += delta_seconds / 2.0;
+        if self.transition_progress >= 1.0 {
+            self.transition_progress = 1.0;
+            self.transition_active = false;
+            if let Some(gl) = &self.gl_context {
+                unsafe {
+                    if let Some(old) = self.transition_old_wallpaper.take() {
+                        gl.delete_texture(old);
+                    }
+                }
+            }
+        }
+    }
 
-        let mesh = Mesh::load_ply(std::path::Path::new(ply_path))?;
+    pub fn draw_transition_overlay(&mut self) -> Result<()> {
+        if !self.transition_active {
+            return Ok(());
+        }
+        let gl = match &self.gl_context { Some(c) => c, None => return Ok(()) };
+        let program = match self.transition_shader { Some(p) => p, None => return Ok(()) };
+        let old_tex = match self.transition_old_wallpaper { Some(t) => t, None => return Ok(()) };
 
-        self.mesh_camera_z   = 0.0;
-        self.mesh_near_z     = mesh.aabb[5].abs().max(0.1);
-        self.mesh_xy_half    = mesh.xy_half_extent().max(0.001);
-        self.mesh_fov_y_deg    = mesh.fov_y_deg;
-        self.mesh_image_aspect = mesh.image_aspect.max(0.01);
-        self.mesh_index_count  = mesh.indices.len() as u32;
-        self.mesh_has_uvs      = mesh.has_uvs;
-
-        log::info!(
-            "Mesh reloaded: {} verts, near_z={:.3}, xy_half={:.3}, depth_range={:.3}, fov_y={:.2}°, image_aspect={:.4}",
-            mesh.vertex_count, self.mesh_near_z, self.mesh_xy_half,
-            mesh.depth_range(), self.mesh_fov_y_deg, self.mesh_image_aspect
-        );
+        let t = self.transition_progress as f32;
+        let eased = t * t; // ease-in: starts slow, accelerates
 
         unsafe {
-            if let Some(old) = self.mesh_vao.take() { gl.delete_vertex_array(old); }
-            if let Some(old) = self.mesh_pos_vbo.take() { gl.delete_buffer(old); }
-            if let Some(old) = self.mesh_col_vbo.take() { gl.delete_buffer(old); }
-            if let Some(old) = self.mesh_uv_vbo.take() { gl.delete_buffer(old); }
-            if let Some(old) = self.mesh_ebo.take() { gl.delete_buffer(old); }
+            gl.disable(glow::DEPTH_TEST);
+            gl.depth_mask(false);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.viewport(0, 0, self.screen_width as i32, self.screen_height as i32);
+            gl.use_program(Some(program));
 
-            let vao = gl.create_vertex_array().map_err(gl_error)?;
-            gl.bind_vertex_array(Some(vao));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
+            gl.uniform_1_i32(gl.get_uniform_location(program, "u_old_texture").as_ref(), 0);
 
-            let pos_vbo = gl.create_buffer().map_err(gl_error)?;
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(pos_vbo));
-            gl.buffer_data_u8_slice(
-                glow::ARRAY_BUFFER,
-                bytemuck::cast_slice(&mesh.positions),
-                glow::STATIC_DRAW,
-            );
-            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
-            gl.enable_vertex_attrib_array(0);
+            gl.uniform_1_f32(gl.get_uniform_location(program, "u_progress").as_ref(), eased as f32);
+            gl.uniform_2_f32(gl.get_uniform_location(program, "u_center").as_ref(),
+                self.transition_center_x, self.transition_center_y);
+            gl.uniform_1_f32(gl.get_uniform_location(program, "u_feather").as_ref(), 0.08);
+            gl.uniform_2_f32(gl.get_uniform_location(program, "u_screen_res").as_ref(),
+                self.screen_width as f32, self.screen_height as f32);
 
-            let col_vbo = gl.create_buffer().map_err(gl_error)?;
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(col_vbo));
-            gl.buffer_data_u8_slice(
-                glow::ARRAY_BUFFER,
-                &mesh.colors,
-                glow::STATIC_DRAW,
-            );
-            gl.vertex_attrib_pointer_f32(1, 4, glow::UNSIGNED_BYTE, true, 4, 0);
-            gl.enable_vertex_attrib_array(1);
+            if let Some(vao) = self.transition_vao {
+                gl.bind_vertex_array(Some(vao));
+                gl.draw_elements(glow::TRIANGLES, 6, glow::UNSIGNED_INT, 0);
+                gl.bind_vertex_array(None);
+            }
 
-            let uv_vbo = if mesh.has_uvs && !mesh.uvs.is_empty() {
-                let vbo = gl.create_buffer().map_err(gl_error)?;
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-                gl.buffer_data_u8_slice(
-                    glow::ARRAY_BUFFER,
-                    bytemuck::cast_slice(&mesh.uvs),
-                    glow::STATIC_DRAW,
-                );
-                gl.vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, 8, 0);
-                gl.enable_vertex_attrib_array(2);
-                Some(vbo)
-            } else {
-                None
-            };
-
-            let ebo = gl.create_buffer().map_err(gl_error)?;
-            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
-            gl.buffer_data_u8_slice(
-                glow::ELEMENT_ARRAY_BUFFER,
-                bytemuck::cast_slice(&mesh.indices),
-                glow::STATIC_DRAW,
-            );
-
-            gl.bind_vertex_array(None);
-
-            self.mesh_vao     = Some(vao);
-            self.mesh_pos_vbo = Some(pos_vbo);
-            self.mesh_col_vbo = Some(col_vbo);
-            self.mesh_uv_vbo  = uv_vbo;
-            self.mesh_ebo     = Some(ebo);
+            gl.disable(glow::BLEND);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_mask(true);
         }
-
-        log::info!(
-            "Mesh reuploaded: {} vertices, {} triangles",
-            mesh.vertex_count,
-            mesh.triangle_count
-        );
         Ok(())
     }
 }
@@ -1077,5 +1499,72 @@ void main() {
     } else {
         out_color = vec4(v_color.rgb, 1.0);
     }
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Shaders — transition overlay
+// ---------------------------------------------------------------------------
+
+const TRANSITION_VERT: &str = r#"#version 300 es
+in vec4 a_position;
+in vec2 a_texcoord;
+out vec2 v_texcoord;
+void main() {
+    gl_Position = a_position;
+    v_texcoord = a_texcoord;
+}
+"#;
+
+const TRANSITION_FRAG: &str = r#"#version 300 es
+precision mediump float;
+uniform sampler2D u_old_texture;
+uniform float u_progress;
+uniform vec2 u_center;
+uniform float u_feather;
+uniform vec2 u_screen_res;
+in vec2 v_texcoord;
+out vec4 frag_color;
+
+void main() {
+    // Sample the captured framebuffer directly — it already has parallax/zoom baked in
+    vec4 old_color = texture(u_old_texture, v_texcoord);
+
+    // Expanding circle mask
+    float screen_diag = length(u_screen_res);
+    float max_radius = screen_diag * 1.1;
+    float radius = u_progress * max_radius;
+
+    float dist_px = distance(v_texcoord * u_screen_res, u_center * u_screen_res);
+    float feather_px = u_feather * min(u_screen_res.x, u_screen_res.y);
+
+    // mask=1 outside circle (old visible), mask=0 inside (new shows through)
+    float mask = smoothstep(radius - feather_px, radius + feather_px, dist_px);
+
+    frag_color = vec4(old_color.rgb, mask);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Shaders — fade-in overlay
+// ---------------------------------------------------------------------------
+
+const FADE_VERT: &str = r#"#version 300 es
+in vec4 a_position;
+in vec2 a_texcoord;
+out vec2 v_texcoord;
+void main() {
+    gl_Position = a_position;
+    v_texcoord = a_texcoord;
+}
+"#;
+
+const FADE_FRAG: &str = r#"#version 300 es
+precision mediump float;
+uniform float u_alpha;
+in vec2 v_texcoord;
+out vec4 frag_color;
+void main() {
+    frag_color = vec4(0.0, 0.0, 0.0, u_alpha);
 }
 "#;
