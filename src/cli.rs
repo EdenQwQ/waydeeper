@@ -127,9 +127,9 @@ enum Commands {
     Set {
         /// Path to the wallpaper image (omit to use the configured image)
         image: Option<String>,
-        /// Target monitor name (e.g., eDP-1, HDMI-A-1)
-        #[arg(short, long, default_value = "0")]
-        monitor: String,
+        /// Target monitor name (e.g., eDP-1, HDMI-A-1), or omit to apply to all connected monitors
+        #[arg(short, long)]
+        monitor: Option<String>,
         /// Depth model name (depth-anything-v3-base, midas-small, depth-pro-q4) or path to .onnx file
         #[arg(long)]
         model: Option<String>,
@@ -325,7 +325,7 @@ fn handle_command(command: Commands) -> Result<()> {
                 active_delay,
                 idle_timeout,
             },
-            &monitor,
+            monitor.as_deref(),
             model.as_deref(),
             regenerate,
             invert_depth,
@@ -575,7 +575,7 @@ fn send_reload(
 fn cmd_set(
     image: Option<&str>,
     animation_params: AnimationParams,
-    monitor: &str,
+    monitor: Option<&str>,
     model: Option<&str>,
     regenerate: bool,
     invert_depth: bool,
@@ -583,136 +583,178 @@ fn cmd_set(
     use_inpaint: bool,
     no_inpaint: bool,
 ) -> Result<()> {
-    let config = config::load_config().unwrap_or_default();
-    let existing_config = config.monitors.get(monitor).cloned();
-
     let image_path_string = match image {
         Some(path) => {
             let image_path = std::fs::canonicalize(path)
                 .map_err(|_| anyhow!("Image not found: {}", path))?;
-            image_path.to_string_lossy().to_string()
+            Some(image_path.to_string_lossy().to_string())
         }
-        None => {
-            match existing_config.as_ref().and_then(|c| c.wallpaper_path.as_ref()) {
-                Some(p) if std::path::Path::new(p).exists() => p.clone(),
-                _ => return Err(anyhow!("No image specified and no configured wallpaper for monitor {}", monitor)),
-            }
-        }
+        None => None,
     };
 
     let model_path = model
         .map(|name| models::get_model_path(name).map(|path| path.to_string_lossy().to_string()))
         .transpose()?;
 
-    // Update config with only explicitly provided parameters
-    {
-        let mut config = config::load_config().unwrap_or_default();
-        let monitor_config = config
-            .monitors
-            .entry(monitor.to_string())
-            .or_default();
-
-        if image.is_some() {
-            monitor_config.wallpaper_path = Some(image_path_string.clone());
-        }
-
-        // For animation params: only override if explicitly provided
-        if let Some(strength) = animation_params.strength {
-            monitor_config.strength_x = strength;
-            monitor_config.strength_y = strength;
-        } else {
-            if animation_params.strength_x.is_some() {
-                monitor_config.strength_x = animation_params.strength_x.unwrap();
-            }
-            if animation_params.strength_y.is_some() {
-                monitor_config.strength_y = animation_params.strength_y.unwrap();
-            }
-        }
-
-        if animation_params.smooth_animation {
-            monitor_config.smooth_animation = true;
-        }
-        if animation_params.no_smooth_animation {
-            monitor_config.smooth_animation = false;
-        }
-        if let Some(speed) = animation_params.animation_speed {
-            monitor_config.animation_speed = speed;
-        }
-        if let Some(fps_val) = animation_params.fps {
-            monitor_config.fps = fps_val.value();
-        }
-        if let Some(delay) = animation_params.active_delay {
-            monitor_config.active_delay_ms = delay;
-        }
-        if let Some(idle) = animation_params.idle_timeout {
-            monitor_config.idle_timeout_ms = idle;
-        }
-        if let Some(ref path) = model_path {
-            monitor_config.model_path = Some(path.clone());
-        }
-        if invert_depth {
-            monitor_config.invert_depth = true;
-        }
-        if no_invert_depth {
-            monitor_config.invert_depth = false;
-        }
-        if use_inpaint {
-            monitor_config.use_inpaint = true;
-        }
-        if no_inpaint {
-            monitor_config.use_inpaint = false;
-        }
-
-        config::save_config(&config)?;
-    }
-
-    // Read back config for resolved values
+    // Determine target monitors
     let config = config::load_config().unwrap_or_default();
-    let monitor_config = config.monitors.get(monitor).cloned().unwrap_or_default();
-    let resolved_params = animation_params.resolve(&monitor_config);
-
-    let effective_model = model_path
-        .as_deref()
-        .or(monitor_config.model_path.as_deref());
-
-    // Reload existing daemon or spawn new one — daemon handles ALL heavy lifting
-    if let Ok(client) = DaemonClient::new(monitor) {
-        if client.is_running() {
-            println!("Reloading wallpaper daemon for monitor {}...", monitor);
-            send_reload(
-                monitor,
-                &image_path_string,
-                &resolved_params,
-                effective_model,
-                regenerate,
-                monitor_config.invert_depth,
-                monitor_config.use_inpaint,
-                &monitor_config.inpaint_python,
-            )?;
-            println!("Wallpaper daemon reloaded for monitor {}.", monitor);
-            return Ok(());
+    let connected_outputs = wayland::list_connected_outputs();
+    
+    let target_monitors: Vec<String> = match monitor {
+        Some(name) => vec![name.to_string()],
+        None => {
+            // Default to all connected monitors
+            if connected_outputs.is_empty() {
+                return Err(anyhow!("No monitors detected. Specify a monitor with -m."));
+            }
+            connected_outputs
         }
+    };
+
+    let mut reloaded = 0;
+    let mut started = 0;
+    let mut failed = 0;
+
+    for monitor_id in &target_monitors {
+        let existing_config = config.monitors.get(monitor_id).cloned();
+
+        // Resolve image path for this monitor
+        let img_path = match &image_path_string {
+            Some(p) => p.clone(),
+            None => {
+                match existing_config.as_ref().and_then(|c| c.wallpaper_path.as_ref()) {
+                    Some(p) if std::path::Path::new(p).exists() => p.clone(),
+                    _ => {
+                        println!("Skipping monitor {}: no image specified and no configured wallpaper", monitor_id);
+                        failed += 1;
+                        continue;
+                    }
+                }
+            }
+        };
+
+        // Resolve animation params for this monitor
+        let mon_config = config.monitors.get(monitor_id).cloned().unwrap_or_default();
+        let resolved_params = animation_params.resolve(&mon_config);
+
+        // Resolve model for this monitor
+        let eff_model = model_path.as_deref().or(mon_config.model_path.as_deref());
+
+        // Update config with only explicitly provided parameters
+        {
+            let mut config = config::load_config().unwrap_or_default();
+            let monitor_config = config
+                .monitors
+                .entry(monitor_id.clone())
+                .or_default();
+
+            if image.is_some() {
+                monitor_config.wallpaper_path = Some(img_path.clone());
+            }
+
+            // For animation params: only override if explicitly provided
+            if let Some(strength) = animation_params.strength {
+                monitor_config.strength_x = strength;
+                monitor_config.strength_y = strength;
+            } else {
+                if animation_params.strength_x.is_some() {
+                    monitor_config.strength_x = animation_params.strength_x.unwrap();
+                }
+                if animation_params.strength_y.is_some() {
+                    monitor_config.strength_y = animation_params.strength_y.unwrap();
+                }
+            }
+
+            if animation_params.smooth_animation {
+                monitor_config.smooth_animation = true;
+            }
+            if animation_params.no_smooth_animation {
+                monitor_config.smooth_animation = false;
+            }
+            if let Some(speed) = animation_params.animation_speed {
+                monitor_config.animation_speed = speed;
+            }
+            if let Some(fps_val) = animation_params.fps {
+                monitor_config.fps = fps_val.value();
+            }
+            if let Some(delay) = animation_params.active_delay {
+                monitor_config.active_delay_ms = delay;
+            }
+            if let Some(idle) = animation_params.idle_timeout {
+                monitor_config.idle_timeout_ms = idle;
+            }
+            if let Some(ref path) = model_path {
+                monitor_config.model_path = Some(path.clone());
+            }
+            if invert_depth {
+                monitor_config.invert_depth = true;
+            }
+            if no_invert_depth {
+                monitor_config.invert_depth = false;
+            }
+            if use_inpaint {
+                monitor_config.use_inpaint = true;
+            }
+            if no_inpaint {
+                monitor_config.use_inpaint = false;
+            }
+
+            config::save_config(&config)?;
+        }
+
+        // Reload existing daemon or spawn new one — daemon handles ALL heavy lifting
+        if let Ok(client) = DaemonClient::new(monitor_id) {
+            if client.is_running() {
+                println!("Reloading wallpaper daemon for monitor {}...", monitor_id);
+                send_reload(
+                    monitor_id,
+                    &img_path,
+                    &resolved_params,
+                    eff_model,
+                    regenerate,
+                    mon_config.invert_depth,
+                    mon_config.use_inpaint,
+                    &mon_config.inpaint_python,
+                )?;
+                println!("Wallpaper daemon reloaded for monitor {}.", monitor_id);
+                reloaded += 1;
+                continue;
+            }
+        }
+
+        println!("Starting wallpaper daemon for monitor {}...", monitor_id);
+
+        let mut child = spawn_daemon(
+            &img_path,
+            monitor_id,
+            &resolved_params,
+            eff_model,
+            regenerate,
+            mon_config.invert_depth,
+            mon_config.use_inpaint,
+            &mon_config.inpaint_python,
+            false,
+        )?;
+
+        if wait_for_daemon(monitor_id, 180, &mut child) {
+            println!("Wallpaper daemon started for monitor {}.", monitor_id);
+            started += 1;
+        } else {
+            println!("Daemon did not become responsive for monitor {}", monitor_id);
+            failed += 1;
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
     }
 
-    println!("Starting wallpaper daemon for monitor {}...", monitor);
+    if started  > 0 { println!("\nStarted {} daemon(s).", started); }
+    if reloaded > 0 { println!("\nReloaded {} daemon(s).", reloaded); }
+    if failed   > 0 { println!("Failed to start {} daemon(s).", failed); }
 
-    let mut child = spawn_daemon(
-        &image_path_string,
-        monitor,
-        &resolved_params,
-        effective_model,
-        regenerate,
-        monitor_config.invert_depth,
-        monitor_config.use_inpaint,
-        &monitor_config.inpaint_python,
-        false,
-    )?;
-
-    if wait_for_daemon(monitor, 180, &mut child) {
-        println!("Wallpaper daemon started for monitor {}.", monitor);
-        Ok(())
+    if failed > 0 {
+        Err(anyhow!("Some daemons failed to start"))
     } else {
-        Err(anyhow!("Daemon did not become responsive for monitor {}", monitor))
+        Ok(())
     }
 }
 
