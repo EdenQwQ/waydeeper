@@ -418,6 +418,11 @@ scripts/
 
 ## Acknowledgements
 
+This is a vibe coding project.
+Most of the code is written using [kimi-cli](https://github.com/MoonshotAI/kimi-cli).
+As a personal hobby project, it's not production quality and may contain bugs or performance issues.
+Issues and pull requests are welcome, but I may not be able to respond to them in a timely manner.
+
 Special thanks to:
 
 - [lively wallpaper](https://github.com/rocksdanister/lively) — this project is inspired by its depth effect wallpaper feature. waydeeper started as a Wayland implementation of that Windows app's depth wallpaper functionality
