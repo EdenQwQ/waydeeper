@@ -4,11 +4,56 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use crate::config;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReloadParams {
+    pub wallpaper_path: String,
+    pub strength_x: f64,
+    pub strength_y: f64,
+    pub smooth_animation: bool,
+    pub animation_speed: f64,
+    pub fps: u32,
+    pub active_delay_ms: f64,
+    pub idle_timeout_ms: f64,
+    pub invert_depth: bool,
+    pub use_inpaint: bool,
+    pub model_path: Option<String>,
+    pub regenerate: bool,
+    pub inpaint_python: String,
+}
+
+pub struct ReloadState {
+    pub pending: AtomicBool,
+    pub params: Mutex<Option<ReloadParams>>,
+}
+
+impl ReloadState {
+    pub fn new() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            params: Mutex::new(None),
+        }
+    }
+
+    pub fn request_reload(&self, params: ReloadParams) {
+        let mut guard = self.params.lock().unwrap();
+        *guard = Some(params);
+        self.pending.store(true, Ordering::SeqCst);
+    }
+
+    pub fn take_pending(&self) -> Option<ReloadParams> {
+        if self.pending.swap(false, Ordering::SeqCst) {
+            self.params.lock().unwrap().take()
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcRequest {

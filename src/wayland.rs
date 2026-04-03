@@ -30,6 +30,7 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport, wp_viewporter},
 };
 
+use crate::ipc::ReloadState;
 use crate::renderer::{EglRenderer, RendererConfig};
 
 pub struct App {
@@ -62,7 +63,7 @@ fn find_output(output_state: &OutputState, monitor: &str) -> Option<wl_output::W
     None
 }
 
-pub fn run(config: RendererConfig, running: Arc<AtomicBool>) -> Result<()> {
+pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<ReloadState>) -> Result<()> {
     log::info!(
         "renderer: starting on monitor '{}' (strength_x={}, strength_y={}, fps={})",
         config.monitor, config.strength_x, config.strength_y, config.fps,
@@ -196,6 +197,11 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>) -> Result<()> {
         if !running.load(Ordering::SeqCst) {
             log::info!("renderer: exiting");
             break;
+        }
+
+        if reload_state.pending.load(Ordering::SeqCst) {
+            log::info!("renderer: reload requested, returning to daemon loop");
+            return Ok(());
         }
 
         let _ = event_queue.dispatch_pending(&mut app);

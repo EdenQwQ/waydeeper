@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use serde_json::json;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
 use crate::config::{self, MonitorConfig};
 use crate::daemon::DepthWallpaperDaemon;
-use crate::ipc::{self, DaemonClient};
+use crate::ipc::{self, DaemonClient, ReloadParams};
 use crate::models;
 use crate::wayland;
 
@@ -174,55 +175,11 @@ enum Commands {
         verbose: bool,
     },
 
+    /// Start or reload daemons for configured monitors. Reads config, generates assets, spawns/reloads daemons.
     Daemon {
-        /// Parallax strength for both axes (default: 0.02)
-        #[arg(short, long)]
-        strength: Option<f64>,
-        /// Parallax strength on X axis (default: 0.02)
-        #[arg(long)]
-        strength_x: Option<f64>,
-        /// Parallax strength on Y axis (default: 0.02)
-        #[arg(long)]
-        strength_y: Option<f64>,
         /// Target monitor name, or omit to start all configured monitors
         #[arg(short, long)]
         monitor: Option<String>,
-        /// Enable smooth easing animation
-        #[arg(long)]
-        smooth_animation: bool,
-        /// Disable smooth easing animation
-        #[arg(long)]
-        no_smooth_animation: bool,
-        /// Animation speed multiplier (default: 0.02)
-        #[arg(long)]
-        animation_speed: Option<f64>,
-        /// Target frame rate: 30 or 60 (default: 60)
-        #[arg(long)]
-        fps: Option<Fps>,
-        /// Delay in ms before animation starts after mouse enters (default: 150)
-        #[arg(long)]
-        active_delay: Option<f64>,
-        /// Idle timeout in ms before animation stops (default: 500)
-        #[arg(long)]
-        idle_timeout: Option<f64>,
-        /// Depth model name (midas, depth-pro-q4) or path to .onnx file
-        #[arg(long)]
-        model: Option<String>,
-        /// Force regenerate depth map and inpaint mesh
-        #[arg(long)]
-        regenerate: bool,
-        /// Invert depth interpretation (near ↔ far)
-        #[arg(long)]
-        invert_depth: bool,
-        /// Disable depth inversion
-        #[arg(long)]
-        no_invert_depth: bool,
-        /// Enable 3D inpainting mode
-        #[arg(long)]
-        inpaint: bool,
-        /// Disable 3D inpainting mode
-        #[arg(long)]
-        no_inpaint: bool,
         /// Enable verbose logging
         #[arg(short, long)]
         verbose: bool,
@@ -368,44 +325,9 @@ fn handle_command(command: Commands) -> Result<()> {
         ),
 
         Commands::Daemon {
-            strength,
-            strength_x,
-            strength_y,
             monitor,
-            smooth_animation,
-            no_smooth_animation,
-            animation_speed,
-            fps,
-            active_delay,
-            idle_timeout,
-            model,
-            regenerate,
-            invert_depth,
-            no_invert_depth,
-            inpaint,
-            no_inpaint,
             verbose,
-        } => cmd_daemon(
-            AnimationParams {
-                strength,
-                strength_x,
-                strength_y,
-                smooth_animation,
-                no_smooth_animation,
-                animation_speed,
-                fps,
-                active_delay,
-                idle_timeout,
-            },
-            monitor.as_deref(),
-            model.as_deref(),
-            regenerate,
-            invert_depth,
-            no_invert_depth,
-            inpaint,
-            no_inpaint,
-            verbose,
-        ),
+        } => cmd_daemon(monitor.as_deref(), verbose),
 
         Commands::Stop { monitor } => cmd_stop(monitor.as_deref()),
         Commands::ListMonitors => cmd_list_monitors(),
@@ -526,18 +448,6 @@ fn spawn_daemon(
     Ok(command.spawn()?)
 }
 
-fn stop_existing_daemon(monitor: &str, verbose: bool) {
-    if let Ok(client) = DaemonClient::new(monitor) {
-        if client.is_running() {
-            if verbose {
-                println!("Stopping existing daemon for monitor {}...", monitor);
-            }
-            let _ = ipc::stop_daemon(monitor, Duration::from_secs(5));
-            std::thread::sleep(Duration::from_millis(300));
-        }
-    }
-}
-
 fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::Child) -> bool {
     let delay_ms = 500;
     let max_attempts = (timeout_secs * 1000 / delay_ms) as u32;
@@ -546,14 +456,13 @@ fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::C
     for _ in 0..max_attempts {
         std::thread::sleep(Duration::from_millis(delay_ms));
         
-        // Check if the child process has exited early
         match child.try_wait() {
             Ok(Some(status)) => {
                 println!();
                 println!("Daemon process exited early with status: {}", status);
                 return false;
             }
-            Ok(None) => {} // Still running
+            Ok(None) => {}
             Err(e) => {
                 println!();
                 println!("Failed to check daemon process status: {}", e);
@@ -582,6 +491,43 @@ fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::C
 }
 
 // ---------------------------------------------------------------------------
+// send_reload: sends RELOAD IPC to existing daemon
+// ---------------------------------------------------------------------------
+
+fn send_reload(
+    monitor: &str,
+    wallpaper_path: &str,
+    params: &ResolvedAnimationParams,
+    model_path: Option<&str>,
+    regenerate: bool,
+    invert_depth: bool,
+    use_inpaint: bool,
+    inpaint_python: &str,
+) -> Result<()> {
+    let client = DaemonClient::new(monitor)?;
+    let reload_params = ReloadParams {
+        wallpaper_path: wallpaper_path.to_string(),
+        strength_x: params.strength_x,
+        strength_y: params.strength_y,
+        smooth_animation: params.smooth_animation,
+        animation_speed: params.animation_speed,
+        fps: params.fps,
+        active_delay_ms: params.active_delay,
+        idle_timeout_ms: params.idle_timeout,
+        invert_depth,
+        use_inpaint,
+        model_path: model_path.map(|s| s.to_string()),
+        regenerate,
+        inpaint_python: inpaint_python.to_string(),
+    };
+    let response = client.send_command("RELOAD", json!(reload_params), Duration::from_secs(10))?;
+    if !response.success {
+        return Err(anyhow!("Reload rejected: {:?}", response.error));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // cmd_set
 // ---------------------------------------------------------------------------
 
@@ -606,6 +552,7 @@ fn cmd_set(
         .map(|name| models::get_model_path(name).map(|path| path.to_string_lossy().to_string()))
         .transpose()?;
 
+    // Generate depth map
     {
         let mut daemon = DepthWallpaperDaemon::new()?;
         daemon.load_configuration();
@@ -631,6 +578,7 @@ fn cmd_set(
         }
     }
 
+    // Update config with only explicitly provided parameters
     {
         let mut config = config::load_config().unwrap_or_default();
         let monitor_config = config
@@ -640,31 +588,57 @@ fn cmd_set(
 
         monitor_config.wallpaper_path = Some(image_path_string.clone());
 
+        // For animation params: only override if explicitly provided
         if let Some(strength) = animation_params.strength {
             monitor_config.strength_x = strength;
             monitor_config.strength_y = strength;
         } else {
-            if let Some(sx) = animation_params.strength_x { monitor_config.strength_x = sx; }
-            if let Some(sy) = animation_params.strength_y { monitor_config.strength_y = sy; }
+            if animation_params.strength_x.is_some() {
+                monitor_config.strength_x = animation_params.strength_x.unwrap();
+            }
+            if animation_params.strength_y.is_some() {
+                monitor_config.strength_y = animation_params.strength_y.unwrap();
+            }
         }
 
-        if animation_params.smooth_animation      { monitor_config.smooth_animation = true; }
-        if animation_params.no_smooth_animation   { monitor_config.smooth_animation = false; }
-        if let Some(speed) = animation_params.animation_speed { monitor_config.animation_speed = speed; }
-        if let Some(fps)   = animation_params.fps              { monitor_config.fps = fps.value(); }
-        if let Some(delay) = animation_params.active_delay     { monitor_config.active_delay_ms = delay; }
-        if let Some(idle)  = animation_params.idle_timeout     { monitor_config.idle_timeout_ms = idle; }
-        if let Some(ref path) = model_path                     { monitor_config.model_path = Some(path.clone()); }
-        if invert_depth                                         { monitor_config.invert_depth = true; }
-        if no_invert_depth                                      { monitor_config.invert_depth = false; }
-        if use_inpaint                                          { monitor_config.use_inpaint = true; }
-        if no_inpaint                                           { monitor_config.use_inpaint = false; }
+        if animation_params.smooth_animation {
+            monitor_config.smooth_animation = true;
+        }
+        if animation_params.no_smooth_animation {
+            monitor_config.smooth_animation = false;
+        }
+        if let Some(speed) = animation_params.animation_speed {
+            monitor_config.animation_speed = speed;
+        }
+        if let Some(fps_val) = animation_params.fps {
+            monitor_config.fps = fps_val.value();
+        }
+        if let Some(delay) = animation_params.active_delay {
+            monitor_config.active_delay_ms = delay;
+        }
+        if let Some(idle) = animation_params.idle_timeout {
+            monitor_config.idle_timeout_ms = idle;
+        }
+        if let Some(ref path) = model_path {
+            monitor_config.model_path = Some(path.clone());
+        }
+        if invert_depth {
+            monitor_config.invert_depth = true;
+        }
+        if no_invert_depth {
+            monitor_config.invert_depth = false;
+        }
+        if use_inpaint {
+            monitor_config.use_inpaint = true;
+        }
+        if no_inpaint {
+            monitor_config.use_inpaint = false;
+        }
 
         config::save_config(&config)?;
     }
 
-    stop_existing_daemon(monitor, true);
-
+    // Generate inpaint mesh if needed
     let config = config::load_config().unwrap_or_default();
     let monitor_config = config.monitors.get(monitor).cloned().unwrap_or_default();
     let resolved_params = animation_params.resolve(&monitor_config);
@@ -672,6 +646,47 @@ fn cmd_set(
     let effective_model = model_path
         .as_deref()
         .or(monitor_config.model_path.as_deref());
+
+    if monitor_config.use_inpaint {
+        let mut daemon = DepthWallpaperDaemon::new()?;
+        daemon.load_configuration();
+        let depth_path = daemon.ensure_depth_map_exists(
+            &image_path_string,
+            effective_model,
+            regenerate,
+        )?;
+        match daemon.ensure_ply_exists(
+            &image_path_string,
+            &depth_path,
+            &monitor_config.inpaint_python,
+            regenerate,
+            monitor_config.invert_depth,
+        ) {
+            Ok(ply) => println!("Inpaint mesh ready: {}", ply),
+            Err(err) => {
+                println!("Inpainting failed, using flat depth mode: {}", err);
+            }
+        }
+    }
+
+    // Reload existing daemon or spawn new one
+    if let Ok(client) = DaemonClient::new(monitor) {
+        if client.is_running() {
+            println!("Reloading wallpaper daemon for monitor {}...", monitor);
+            send_reload(
+                monitor,
+                &image_path_string,
+                &resolved_params,
+                effective_model,
+                regenerate,
+                monitor_config.invert_depth,
+                monitor_config.use_inpaint,
+                &monitor_config.inpaint_python,
+            )?;
+            println!("Wallpaper daemon reloaded for monitor {}.", monitor);
+            return Ok(());
+        }
+    }
 
     println!("Starting wallpaper daemon for monitor {}...", monitor);
 
@@ -699,18 +714,7 @@ fn cmd_set(
 // cmd_daemon
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_daemon(
-    animation_params: AnimationParams,
-    monitor: Option<&str>,
-    model: Option<&str>,
-    regenerate: bool,
-    invert_depth: bool,
-    no_invert_depth: bool,
-    use_inpaint: bool,
-    no_inpaint: bool,
-    verbose: bool,
-) -> Result<()> {
+fn cmd_daemon(monitor: Option<&str>, verbose: bool) -> Result<()> {
     let config = config::load_config()?;
 
     if config.monitors.is_empty() {
@@ -723,10 +727,6 @@ fn cmd_daemon(
         None => config.monitors.keys().cloned().collect(),
     };
 
-    let model_path = model
-        .map(|name| models::get_model_path(name).map(|path| path.to_string_lossy().to_string()))
-        .transpose()?;
-
     let connected_outputs = wayland::list_connected_outputs();
     let have_output_list = !connected_outputs.is_empty();
     if have_output_list {
@@ -734,6 +734,7 @@ fn cmd_daemon(
     }
 
     let mut started = 0;
+    let mut reloaded = 0;
     let mut failed = 0;
 
     for monitor_id in &target_monitors {
@@ -766,26 +767,59 @@ fn cmd_daemon(
             }
         };
 
-        stop_existing_daemon(monitor_id, verbose);
+        let resolved_params = AnimationParams {
+            strength: None,
+            strength_x: None,
+            strength_y: None,
+            smooth_animation: false,
+            no_smooth_animation: false,
+            animation_speed: None,
+            fps: None,
+            active_delay: None,
+            idle_timeout: None,
+        }.resolve(monitor_config);
 
-        let resolved_params = animation_params.resolve(monitor_config);
-        let effective_invert = if no_invert_depth {
-            false
-        } else if invert_depth {
-            true
-        } else {
-            monitor_config.invert_depth
-        };
-        let effective_inpaint = if no_inpaint {
-            false
-        } else if use_inpaint {
-            true
-        } else {
-            monitor_config.use_inpaint
-        };
-        let effective_model = model_path
-            .clone()
-            .or_else(|| monitor_config.model_path.clone());
+        let effective_model = monitor_config.model_path.as_deref();
+
+        // Check if daemon is already running
+        if let Ok(client) = DaemonClient::new(monitor_id) {
+            if client.is_running() {
+                println!("Reloading daemon for monitor {}...", monitor_id);
+                let reload_params = ReloadParams {
+                    wallpaper_path: wallpaper_path.clone(),
+                    strength_x: resolved_params.strength_x,
+                    strength_y: resolved_params.strength_y,
+                    smooth_animation: resolved_params.smooth_animation,
+                    animation_speed: resolved_params.animation_speed,
+                    fps: resolved_params.fps,
+                    active_delay_ms: resolved_params.active_delay,
+                    idle_timeout_ms: resolved_params.idle_timeout,
+                    invert_depth: monitor_config.invert_depth,
+                    use_inpaint: monitor_config.use_inpaint,
+                    model_path: monitor_config.model_path.clone(),
+                    regenerate: false,
+                    inpaint_python: monitor_config.inpaint_python.clone(),
+                };
+                match client.send_command("RELOAD", json!(reload_params), Duration::from_secs(10)) {
+                    Ok(response) if response.success => {
+                        println!("Reloaded daemon for monitor {}.", monitor_id);
+                        reloaded += 1;
+                    }
+                    Ok(_) => {
+                        println!("Reload rejected for monitor {}, restarting...", monitor_id);
+                        // Fall through to stop + spawn
+                        let _ = ipc::stop_daemon(monitor_id, Duration::from_secs(5));
+                        std::thread::sleep(Duration::from_millis(300));
+                    }
+                    Err(_) => {
+                        println!("IPC failed for monitor {}, restarting...", monitor_id);
+                        let _ = ipc::stop_daemon(monitor_id, Duration::from_secs(5));
+                        std::thread::sleep(Duration::from_millis(300));
+                    }
+                }
+                continue;
+            }
+        }
 
         if verbose {
             println!("Starting daemon for monitor {}: {}", monitor_id, wallpaper_path);
@@ -795,10 +829,10 @@ fn cmd_daemon(
             &wallpaper_path,
             monitor_id,
             &resolved_params,
-            effective_model.as_deref(),
-            regenerate,
-            effective_invert,
-            effective_inpaint,
+            effective_model,
+            false,
+            monitor_config.invert_depth,
+            monitor_config.use_inpaint,
             &monitor_config.inpaint_python,
             verbose,
         ) {
@@ -820,8 +854,9 @@ fn cmd_daemon(
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    if started > 0 { println!("\nStarted {} daemon(s).", started); }
-    if failed  > 0 { println!("Failed to start {} daemon(s).", failed); }
+    if started  > 0 { println!("\nStarted {} daemon(s).", started); }
+    if reloaded > 0 { println!("\nReloaded {} daemon(s).", reloaded); }
+    if failed   > 0 { println!("Failed to start {} daemon(s).", failed); }
 
     if failed > 0 {
         Err(anyhow!("Some daemons failed to start"))
