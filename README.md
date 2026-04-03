@@ -29,7 +29,7 @@ https://github.com/user-attachments/assets/ea7e0999-1a28-4396-b9b1-a24a520aa6fd
 #### Run without installing
 
 ```bash
-nix run github:EdenQwQ/waydeeper-rust
+nix run github:EdenQwQ/waydeeper
 ```
 
 #### Install via Flakes
@@ -38,7 +38,7 @@ Add to your `flake.nix` inputs:
 
 ```nix
 {
-  inputs.waydeeper-rust.url = "github:EdenQwQ/waydeeper-rust";
+  inputs.waydeeper.url = "github:EdenQwQ/waydeeper";
 }
 ```
 
@@ -48,7 +48,7 @@ Then add to your system or home packages:
 # NixOS configuration
 { inputs, pkgs, ... }:
 {
-  environment.systemPackages = [ inputs.waydeeper-rust.packages.${pkgs.system}.default ];
+  environment.systemPackages = [ inputs.waydeeper.packages.${pkgs.system}.default ];
 }
 ```
 
@@ -56,7 +56,7 @@ Then add to your system or home packages:
 # Home Manager
 { inputs, pkgs, ... }:
 {
-  home.packages = [ inputs.waydeeper-rust.packages.${pkgs.system}.default ];
+  home.packages = [ inputs.waydeeper.packages.${pkgs.system}.default ];
 }
 ```
 
@@ -67,7 +67,7 @@ Includes a systemd user service for auto-start:
 ```nix
 { inputs, ... }:
 {
-  imports = [ inputs.waydeeper-rust.homeManagerModules.default ];
+  imports = [ inputs.waydeeper.homeManagerModules.default ];
   services.waydeeper.enable = true;
 }
 ```
@@ -77,8 +77,8 @@ Includes a systemd user service for auto-start:
 #### Quick install script (recommended for non-Nix)
 
 ```bash
-git clone https://github.com/EdenQwQ/waydeeper-rust.git
-cd waydeeper-rust
+git clone https://github.com/EdenQwQ/waydeeper.git
+cd waydeeper
 # Installs to ~/.local/bin (user) or /usr/local/bin (root)
 # Prompts for inpainting support and model download
 bash install.sh
@@ -125,8 +125,8 @@ sudo apt install -y \
 **2. Build**
 
 ```bash
-git clone https://github.com/EdenQwQ/waydeeper-rust.git
-cd waydeeper-rust
+git clone https://github.com/EdenQwQ/waydeeper.git
+cd waydeeper
 cargo build --release
 ```
 
@@ -211,7 +211,7 @@ The inpainting scripts are installed automatically by `install.sh`. If you built
 manually, point waydeeper to them:
 
 ```bash
-export WAYDEEPER_INPAINT_SCRIPT=/path/to/waydeeper-rust/scripts/inpaint.py
+export WAYDEEPER_INPAINT_SCRIPT=/path/to/waydeeper/scripts/inpaint.py
 ```
 
 ```bash
