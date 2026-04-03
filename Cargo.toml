@@ -1,0 +1,45 @@
+[package]
+name = "waydeeper"
+version = "0.1.0"
+edition = "2021"
+description = "GPU-accelerated depth effect wallpaper for Wayland"
+license = "MIT"
+
+[[bin]]
+name = "waydeeper"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+dirs = "5"
+nix = { version = "0.29", features = ["signal", "process", "user", "poll"] }
+blake2 = "0.10"
+digest = "0.10"
+
+# Image handling
+image = "0.25"
+
+# Wayland client + layer shell
+smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+
+# OpenGL (loaded via eglGetProcAddress)
+glow = "0.14"
+bytemuck = { version = "1", features = ["derive"] }
+
+# ONNX runtime (load-dynamic links to system libonnxruntime.so at runtime)
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "ndarray"] }
+ndarray = "0.17"
+
+# HTTP downloads
+ureq = "2"
+zip = "2"
+
+[build-dependencies]
+cc = "1"
