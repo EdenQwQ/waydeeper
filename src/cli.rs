@@ -130,7 +130,7 @@ enum Commands {
         /// Target monitor name (e.g., eDP-1, HDMI-A-1)
         #[arg(short, long, default_value = "0")]
         monitor: String,
-        /// Depth model name (midas, depth-pro-q4) or path to .onnx file
+        /// Depth model name (depth-anything-v3-base, midas-small, depth-pro-q4) or path to .onnx file
         #[arg(long)]
         model: Option<String>,
         /// Enable 3D inpainting for true parallax with occlusion
@@ -207,7 +207,7 @@ enum Commands {
     Pregenerate {
         /// Path to the wallpaper image
         image: String,
-        /// Depth model name or path
+        /// Depth model name (depth-anything-v3-base, midas-small, depth-pro-q4) or path
         #[arg(long)]
         model: Option<String>,
         /// Enable 3D inpainting for true parallax with occlusion
@@ -236,7 +236,7 @@ enum Commands {
 
     /// Download ONNX depth models and 3D inpainting networks.
     DownloadModel {
-        /// Model to download: 'midas', 'depth-pro-q4', or 'inpaint'
+        /// Model to download: 'depth-anything-v3-base', 'midas-small', 'depth-pro-q4', or 'inpaint'
         model: Option<String>,
     },
 
@@ -1186,16 +1186,27 @@ fn download_depth_model(model_info: &models::ModelInfo) -> Result<()> {
         return Ok(());
     }
 
-    let dest = models_dir.join(format!("{}.onnx", model_info.name));
-    println!("\nDownloading {} model...", model_info.name);
-
-    let temp_file = match model_info.format {
-        ModelFormat::Zip => Some(models_dir.join(format!("{}_download.zip", model_info.name))),
-        ModelFormat::Onnx => None,
+    let (dest, download_path, temp_file) = match model_info.format {
+        ModelFormat::Directory => {
+            let model_dir = models_dir.join(model_info.name);
+            std::fs::create_dir_all(&model_dir)?;
+            let dest = model_dir.join("model.onnx");
+            (dest.clone(), dest.clone(), None)
+        }
+        ModelFormat::Zip => {
+            let dest = models_dir.join(format!("{}.onnx", model_info.name));
+            let temp = models_dir.join(format!("{}_download.zip", model_info.name));
+            (dest.clone(), temp.clone(), Some(temp))
+        }
+        ModelFormat::Onnx => {
+            let dest = models_dir.join(format!("{}.onnx", model_info.name));
+            (dest.clone(), dest.clone(), None)
+        }
     };
 
-    let download_path = temp_file.as_deref().unwrap_or(&dest);
-    download_with_progress(model_info.url, download_path, model_info.name)?;
+    println!("\nDownloading {} model...", model_info.name);
+
+    download_with_progress(model_info.url, &download_path, model_info.name)?;
 
     if let ModelFormat::Zip = model_info.format {
         let zip_path = temp_file.as_ref().unwrap();
@@ -1222,6 +1233,18 @@ fn download_depth_model(model_info: &models::ModelInfo) -> Result<()> {
             std::io::copy(&mut zip_content, &mut output_file)?;
             std::fs::remove_file(zip_path)?;
         }
+    }
+
+    // Download extra files for directory-format models
+    for (extra_name, extra_url) in models::MODEL_EXTRA_FILES
+        .iter()
+        .find(|(name, _)| *name == model_info.name)
+        .map(|(_, files)| *files)
+        .unwrap_or(&[])
+    {
+        let extra_dest = models_dir.join(model_info.name).join(extra_name);
+        println!("Downloading {}...", extra_name);
+        download_with_progress(extra_url, &extra_dest, extra_name)?;
     }
 
     println!("Model saved to {}", dest.display());

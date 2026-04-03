@@ -11,6 +11,7 @@ use crate::config::models_dir;
 pub enum ModelFormat {
     Onnx,
     Zip,
+    Directory,
 }
 
 #[derive(Debug, Clone)]
@@ -24,19 +25,34 @@ pub struct ModelInfo {
 
 pub const AVAILABLE_MODELS: &[ModelInfo] = &[
     ModelInfo {
-        name: "midas",
-        description: "Lightweight and fast, good balance of speed and quality (default)",
+        name: "depth-anything-v3-base",
+        description: "Balanced quality and speed, good for most use cases (default)",
+        url: "https://huggingface.co/onnx-community/depth-anything-v3-base/resolve/main/onnx/model.onnx",
+        format: ModelFormat::Directory,
+        extracted_filename: None,
+    },
+    ModelInfo {
+        name: "midas-small",
+        description: "Lightweight and fast, lower quality",
         url: "https://github.com/rocksdanister/lively-ml-models/releases/download/v1.0.0.0/midas_small.zip",
         format: ModelFormat::Zip,
         extracted_filename: Some("model.onnx"),
     },
     ModelInfo {
         name: "depth-pro-q4",
-        description: "Apple's Depth Pro model (4-bit quantized) - good quality, large file size, slow",
+        description: "Apple's Depth Pro model (4-bit quantized) - high quality, large file size, slow",
         url: "https://huggingface.co/onnx-community/DepthPro-ONNX/resolve/main/onnx/model_q4.onnx",
         format: ModelFormat::Onnx,
         extracted_filename: None,
     },
+];
+
+/// Additional files to download for directory-format models.
+/// Maps model name → list of (filename, url) pairs.
+pub const MODEL_EXTRA_FILES: &[(&str, &[(&str, &str)])] = &[
+    ("depth-anything-v3-base", &[
+        ("model.onnx_data", "https://huggingface.co/onnx-community/depth-anything-v3-base/resolve/main/onnx/model.onnx_data"),
+    ]),
 ];
 
 // ---------------------------------------------------------------------------
@@ -86,22 +102,45 @@ pub fn get_model(name: &str) -> Result<&ModelInfo> {
         })
 }
 
+/// Check whether a named depth model is already downloaded.
+pub fn depth_model_present(name: &str) -> bool {
+    if let Ok(model) = get_model(name) {
+        match model.format {
+            ModelFormat::Directory => {
+                let model_dir = models_dir().join(model.name);
+                model_dir.join("model.onnx").exists()
+            }
+            ModelFormat::Onnx | ModelFormat::Zip => {
+                let onnx_path = models_dir().join(format!("{}.onnx", model.name));
+                onnx_path.exists()
+            }
+        }
+    } else {
+        false
+    }
+}
+
+/// Get the path to a model's primary ONNX file.
+fn model_primary_path(model: &ModelInfo) -> PathBuf {
+    match model.format {
+        ModelFormat::Directory => models_dir().join(model.name).join("model.onnx"),
+        ModelFormat::Onnx | ModelFormat::Zip => models_dir().join(format!("{}.onnx", model.name)),
+    }
+}
+
 /// Resolve a model name or path to an actual ONNX model file.
 ///
 /// Accepts:
-///   - A known model name (e.g. "midas") → looks for `midas.onnx` in models dir
-///   - An arbitrary name (e.g. "depth-anything-v3") → looks for:
-///     1. `depth-anything-v3.onnx` in models dir
-///     2. `depth-anything-v3/model.onnx` (directory with model.onnx inside)
-///     3. `depth-anything-v3/` directory with any .onnx file
+///   - A known model name (e.g. "depth-anything-v3-base") → looks in models dir
+///   - An arbitrary name → looks for `name.onnx` or `name/model.onnx`
 ///   - An absolute or relative path to a .onnx file or directory
 ///   - If the path is a directory, looks for `model.onnx` inside it
 pub fn get_model_path(name_or_path: &str) -> Result<PathBuf> {
     let models_directory = models_dir();
 
-    // Case 1: known model in registry → check for models_dir/name.onnx
+    // Case 1: known model in registry
     if let Ok(model) = get_model(name_or_path) {
-        let onnx_path = models_directory.join(format!("{}.onnx", model.name));
+        let onnx_path = model_primary_path(model);
         if onnx_path.exists() {
             return Ok(onnx_path);
         }
@@ -181,13 +220,26 @@ pub fn get_model_path(name_or_path: &str) -> Result<PathBuf> {
 }
 
 /// Auto-detect a model file in the models directory.
-/// Prefers midas, then falls back to any .onnx file found.
+/// Prefers depth-anything-v3-base, then midas-small, then falls back to any .onnx file found.
 pub fn find_model_file() -> Result<PathBuf> {
     let models_directory = models_dir();
 
-    let default_path = models_directory.join("midas.onnx");
+    // Prefer depth-anything-v3-base
+    let default_path = models_directory.join("depth-anything-v3-base").join("model.onnx");
     if default_path.exists() {
         return Ok(default_path);
+    }
+
+    // Then midas-small
+    let midas_path = models_directory.join("midas-small.onnx");
+    if midas_path.exists() {
+        return Ok(midas_path);
+    }
+
+    // Legacy midas
+    let legacy_midas = models_directory.join("midas.onnx");
+    if legacy_midas.exists() {
+        return Ok(legacy_midas);
     }
 
     if models_directory.exists() {
@@ -200,7 +252,7 @@ pub fn find_model_file() -> Result<PathBuf> {
         onnx_files.sort();
         if let Some(first) = onnx_files.into_iter().next() {
             log::info!(
-                "Default model 'midas' not found, using '{}'",
+                "Default model 'depth-anything-v3-base' not found, using '{}'",
                 first.file_stem().unwrap_or_default().to_string_lossy()
             );
             return Ok(first);
@@ -232,15 +284,6 @@ pub fn find_model_file() -> Result<PathBuf> {
          Run: waydeeper download-model",
         models_directory.display()
     ))
-}
-
-/// Check whether a named depth model is already downloaded.
-pub fn depth_model_present(name: &str) -> bool {
-    if let Ok(model) = get_model(name) {
-        let onnx_path = models_dir().join(format!("{}.onnx", model.name));
-        return onnx_path.exists();
-    }
-    false
 }
 
 // ---------------------------------------------------------------------------

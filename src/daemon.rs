@@ -66,12 +66,22 @@ impl DepthWallpaperDaemon {
 
     fn get_model_name_for_cache(model_path: Option<&str>) -> String {
         match model_path {
-            Some(path) => std::path::Path::new(path)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("midas")
-                .to_string(),
-            None => "midas".to_string(),
+            Some(path) => {
+                let p = std::path::Path::new(path);
+                // For directory-format models (model.onnx inside a dir), use the parent dir name
+                if p.file_name().is_some_and(|n| n == "model.onnx") {
+                    if let Some(parent) = p.parent() {
+                        if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+                            return name.to_string();
+                        }
+                    }
+                }
+                p.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("depth-anything-v3-base")
+                    .to_string()
+            }
+            None => "depth-anything-v3-base".to_string(),
         }
     }
 

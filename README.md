@@ -143,10 +143,11 @@ waydeeper download-model
 
 This prompts you to select from available models:
 
-| Model             | Description                                            |
-| ----------------- | ------------------------------------------------------ |
-| `midas` (default) | MiDaS small — lightweight, fast, good quality          |
-| `depth-pro-q4`    | Apple Depth Pro (4-bit quantized) — high quality, slow |
+| Model                        | Description                                            |
+| ---------------------------- | ------------------------------------------------------ |
+| `depth-anything-v3-base` (default) | Balanced quality and speed, good for most use cases |
+| `midas-small`                | Lightweight and fast, lower quality                    |
+| `depth-pro-q4`               | Apple Depth Pro (4-bit quantized) — high quality, slow |
 
 Models are stored in `~/.local/share/waydeeper/models/`.
 
@@ -219,7 +220,8 @@ waydeeper set /path/to/wallpaper.jpg \
 ### Use a specific depth model
 
 ```bash
-waydeeper set /path/to/wallpaper.jpg --model midas
+waydeeper set /path/to/wallpaper.jpg --model depth-anything-v3-base
+waydeeper set /path/to/wallpaper.jpg --model midas-small
 waydeeper set /path/to/wallpaper.jpg --model depth-pro-q4
 waydeeper set /path/to/wallpaper.jpg --model /path/to/custom/model.onnx
 ```
@@ -283,7 +285,7 @@ waydeeper pregenerate /path/to/wallpaper.jpg
 waydeeper pregenerate /path/to/wallpaper.jpg --inpaint
 
 # Download depth estimation models
-waydeeper download-model midas
+waydeeper download-model depth-anything-v3-base
 
 # Download inpainting models
 waydeeper download-model inpaint
@@ -309,7 +311,7 @@ Stored in `~/.config/waydeeper/config.json`:
       "fps": 60,
       "active_delay_ms": 150,
       "idle_timeout_ms": 1000,
-      "model_path": "~/.local/share/waydeeper/models/midas.onnx",
+      "model_path": "~/.local/share/waydeeper/models/depth-anything-v3-base/model.onnx",
       "invert_depth": false
     }
   }
