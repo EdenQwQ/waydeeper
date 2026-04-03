@@ -4,7 +4,7 @@ Depth effect wallpaper for Wayland — GPU-accelerated parallax from ML depth es
 
 Inspired by [lively wallpaper](https://github.com/rocksdanister/lively) for Windows, waydeeper brings its depth effect to Wayland compositors.
 
-https://github.com/user-attachments/assets/b5e0ac11-9533-43a7-a0e1-f34e31c7652e
+https://github.com/user-attachments/assets/ea7e0999-1a28-4396-b9b1-a24a520aa6fd
 
 ## Features
 
