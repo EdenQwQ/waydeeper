@@ -120,8 +120,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Set {
-        /// Path to the wallpaper image
-        image: String,
+        /// Path to the wallpaper image (omit to use the configured image)
+        image: Option<String>,
         /// Parallax strength for both axes (default: 0.02)
         #[arg(short, long)]
         strength: Option<f64>,
@@ -301,7 +301,7 @@ fn handle_command(command: Commands) -> Result<()> {
             inpaint,
             no_inpaint,
         } => cmd_set(
-            &image,
+            image.as_deref(),
             AnimationParams {
                 strength,
                 strength_x,
@@ -561,7 +561,7 @@ fn send_reload(
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_set(
-    image: &str,
+    image: Option<&str>,
     animation_params: AnimationParams,
     monitor: &str,
     model: Option<&str>,
@@ -571,9 +571,22 @@ fn cmd_set(
     use_inpaint: bool,
     no_inpaint: bool,
 ) -> Result<()> {
-    let image_path = std::fs::canonicalize(image)
-        .map_err(|_| anyhow!("Image not found: {}", image))?;
-    let image_path_string = image_path.to_string_lossy().to_string();
+    let config = config::load_config().unwrap_or_default();
+    let existing_config = config.monitors.get(monitor).cloned();
+
+    let image_path_string = match image {
+        Some(path) => {
+            let image_path = std::fs::canonicalize(path)
+                .map_err(|_| anyhow!("Image not found: {}", path))?;
+            image_path.to_string_lossy().to_string()
+        }
+        None => {
+            match existing_config.as_ref().and_then(|c| c.wallpaper_path.as_ref()) {
+                Some(p) if std::path::Path::new(p).exists() => p.clone(),
+                _ => return Err(anyhow!("No image specified and no configured wallpaper for monitor {}", monitor)),
+            }
+        }
+    };
 
     let model_path = model
         .map(|name| models::get_model_path(name).map(|path| path.to_string_lossy().to_string()))
@@ -587,7 +600,9 @@ fn cmd_set(
             .entry(monitor.to_string())
             .or_default();
 
-        monitor_config.wallpaper_path = Some(image_path_string.clone());
+        if image.is_some() {
+            monitor_config.wallpaper_path = Some(image_path_string.clone());
+        }
 
         // For animation params: only override if explicitly provided
         if let Some(strength) = animation_params.strength {
