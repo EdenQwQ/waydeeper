@@ -492,10 +492,16 @@ impl EglRenderer {
         }
 
         if mouse.is_animating {
-            let lerp_per_second = self.config.animation_speed;
-            let lerp = 1.0 - (-lerp_per_second * delta_seconds).exp();
-            mouse.current_x += (mouse.mouse_x - mouse.current_x) * lerp;
-            mouse.current_y += (mouse.mouse_y - mouse.current_y) * lerp;
+            if self.config.smooth_animation {
+                let lerp_per_frame = 0.02 + self.config.animation_speed * 0.28;
+                let frames = delta_seconds * 60.0;
+                let lerp = 1.0 - (1.0 - lerp_per_frame).powf(frames);
+                mouse.current_x += (mouse.mouse_x - mouse.current_x) * lerp;
+                mouse.current_y += (mouse.mouse_y - mouse.current_y) * lerp;
+            } else {
+                mouse.current_x = mouse.mouse_x;
+                mouse.current_y = mouse.mouse_y;
+            }
         }
 
         if !mouse.mouse_in_window {

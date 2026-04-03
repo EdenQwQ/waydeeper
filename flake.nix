@@ -43,7 +43,6 @@
         inpaintPythonEnv = pkgs.python3.withPackages (
           ps: with ps; [
             torch
-            torchvision
             numpy
             scipy
             pillow

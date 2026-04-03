@@ -2,7 +2,7 @@
 
 Depth effect wallpaper for Wayland — GPU-accelerated parallax from ML depth estimation.
 
-Inspired by [lively wallpaper](https://github.com/rocksdanister/lively) for Windows, waydeeper brings its depth effect to Wayland compositors. Built entirely with AI-assisted development.
+Inspired by [lively wallpaper](https://github.com/rocksdanister/lively) for Windows, waydeeper brings its depth effect to Wayland compositors.
 
 https://github.com/user-attachments/assets/b5e0ac11-9533-43a7-a0e1-f34e31c7652e
 
@@ -15,12 +15,11 @@ https://github.com/user-attachments/assets/b5e0ac11-9533-43a7-a0e1-f34e31c7652e
 - **Lazy Animation**: Only animates when the mouse is active on the background surface, with configurable delay and idle timeout
 - **Smart Caching**: Depth maps cached with blake2b hashing; model-aware cache invalidation
 - **Multi-Monitor**: Independent wallpapers per monitor with separate daemon processes
-- **Background Reload**: Change settings or wallpaper without visible interruption — daemon regenerates assets in the background then swaps in-place
+- **Lightweight**: Written in Rust, the running daemon uses minimal CPU and memory.
 
 ## Requirements
 
 - Wayland compositor with `wlr-layer-shell` support (niri, sway, Hyprland, river, etc.)
-- OpenGL ES 3.0 capable GPU
 - ONNX Runtime (for depth estimation)
 
 ## Installation
@@ -75,7 +74,30 @@ Includes a systemd user service for auto-start:
 
 ### Building from Source
 
-#### 1. Install system dependencies
+#### Quick install script (recommended for non-Nix)
+
+```bash
+git clone https://github.com/EdenQwQ/waydeeper-rust.git
+cd waydeeper-rust
+# Installs to ~/.local/bin (user) or /usr/local/bin (root)
+# Prompts for inpainting support and model download
+bash install.sh
+
+# Or force user install:
+bash install.sh --user
+
+# Or include inpainting without prompting:
+bash install.sh --with-inpaint
+
+# Or custom prefix:
+bash install.sh --prefix /opt/waydeeper
+```
+
+The script builds the binary, checks for missing dependencies, optionally sets up inpainting (Python deps + scripts), and prompts you to download depth models.
+
+#### Manual build
+
+**1. Install system dependencies**
 
 **Arch Linux:**
 
@@ -100,7 +122,7 @@ sudo apt install -y \
     libssl-dev libonnxruntime-dev
 ```
 
-#### 2. Build
+**2. Build**
 
 ```bash
 git clone https://github.com/EdenQwQ/waydeeper-rust.git
@@ -110,7 +132,20 @@ cargo build --release
 
 The binary will be at `target/release/waydeeper`.
 
-#### 3. Configure ONNX Runtime path
+**3. Install manually**
+
+```bash
+# Copy binary and scripts
+sudo cp target/release/waydeeper /usr/local/bin/
+sudo mkdir -p /usr/local/share/waydeeper/scripts
+sudo cp scripts/inpaint.py scripts/networks.py /usr/local/share/waydeeper/scripts/
+
+# Or with cargo install (scripts must be placed separately)
+cargo install --path .
+export WAYDEEPER_INPAINT_SCRIPT=/path/to/waydeeper/scripts/inpaint.py
+```
+
+**4. Configure ONNX Runtime path**
 
 The `ort` crate loads `libonnxruntime.so` at runtime. Set the path before running:
 
@@ -122,16 +157,6 @@ export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export ORT_DYLIB_PATH=/usr/lib/x86_64-linux-gnu/libonnxruntime.so
 
 # Or add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
-```
-
-#### 4. Install manually
-
-```bash
-# Copy binary
-sudo cp target/release/waydeeper /usr/local/bin/
-
-# Or with cargo install
-cargo install --path .
 ```
 
 ## Post-Installation
@@ -163,7 +188,8 @@ Required only for `--inpaint` mode. This mode uses a 3D-photo-inpainting pipelin
 (edge/depth/color networks) to synthesise background behind foreground objects,
 producing true parallax with correct occlusion instead of a flat UV warp.
 
-Additional requirements for inpainting:
+**If you used `install.sh`**, inpainting Python dependencies were handled automatically
+(if you opted in). If you built manually, you'll need:
 
 - Python 3 with `torch`, `scipy`, `networkx`, and `Pillow`
 
@@ -171,14 +197,21 @@ Additional requirements for inpainting:
 
 ```bash
 sudo pacman -S python python-pip python-numpy python-scipy python-pillow python-networkx python-matplotlib
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
 **Ubuntu / Debian:**
 
 ```bash
 sudo apt install -y python3-pip python3-numpy python3-scipy python3-pil python3-networkx python3-matplotlib
-pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu --break-system-packages
+pip3 install torch --index-url https://download.pytorch.org/whl/cpu --break-system-packages
+```
+
+The inpainting scripts are installed automatically by `install.sh`. If you built
+manually, point waydeeper to them:
+
+```bash
+export WAYDEEPER_INPAINT_SCRIPT=/path/to/waydeeper-rust/scripts/inpaint.py
 ```
 
 ```bash
@@ -187,11 +220,11 @@ waydeeper download-model inpaint
 
 Downloads three checkpoints to `~/.local/share/waydeeper/models/inpaint/`:
 
-| File | Purpose |
-| ---------------- | ------------------------------------------ |
-| `edge-model.pth` | Predicts edge patterns around occlusion |
-| `depth-model.pth`| Inpaints depth in synthesised regions |
-| `color-model.pth`| Fills color in synthesised regions |
+| File              | Purpose                                 |
+| ----------------- | --------------------------------------- |
+| `edge-model.pth`  | Predicts edge patterns around occlusion |
+| `depth-model.pth` | Inpaints depth in synthesised regions   |
+| `color-model.pth` | Fills color in synthesised regions      |
 
 > **Note:** The ONNX depth model (Depth Anything V3, MiDaS, Depth Pro) generates the _initial_ depth
 > map from the full image. `depth-model.pth` is a separate network used _only_
