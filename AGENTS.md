@@ -180,7 +180,7 @@ The `edge-model.pth` and `color-model.pth` are also needed for inpainting — th
 
 ## Known Minor Issues
 
-- Depth estimation is CPU-only (ONNX). GPU-accelerated inference would require CUDA/DirectML provider setup.
+- Graph optimization is set to Level1 for cross-vendor stability (prevents hangs on AMD/Intel Linux drivers).
 - Occlusion regions are always 0 for most images (ML inpainting networks load but the near/far separator logic needs tuning). The flat mesh (no inpainting holes) is produced instead and works fine visually.
 
 ## Relevant Files

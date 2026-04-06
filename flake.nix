@@ -77,7 +77,6 @@
               libglvnd
               libxkbcommon
               openssl
-              onnxruntime
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               pkgs.libiconv
@@ -90,49 +89,61 @@
           OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
         };
 
-        # Build dependencies only (for caching)
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-
-        # Build the actual package
-        waydeeper = craneLib.buildPackage (
-          commonArgs
-          // {
-            inherit cargoArtifacts;
-
-            postInstall = ''
-              # Install Python scripts alongside the binary
-              mkdir -p $out/share/waydeeper/scripts
-              cp ${./scripts/inpaint.py} $out/share/waydeeper/scripts/inpaint.py
-              cp ${./scripts/networks.py} $out/share/waydeeper/scripts/networks.py
-
-              wrapProgram $out/bin/waydeeper \
-                --prefix PATH : ${inpaintPythonEnv}/bin \
-                --prefix LD_LIBRARY_PATH : ${
-                  pkgs.lib.makeLibraryPath [
-                    pkgs.wayland
-                    pkgs.libGL
-                    pkgs.libglvnd
-                    pkgs.libxkbcommon
-                    pkgs.onnxruntime
-                  ]
-                } \
-                --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime.so" \
-                --set WAYDEEPER_INPAINT_SCRIPT "$out/share/waydeeper/scripts/inpaint.py"
-            '';
-
-            meta = with pkgs.lib; {
-              description = "GPU-accelerated depth effect wallpaper for Wayland";
-              license = licenses.mit;
-              platforms = platforms.linux;
-              mainProgram = "waydeeper";
+        # Helper: build waydeeper with a given onnxruntime package
+        buildWaydeeper =
+          onnxruntimePkg:
+          let
+            args = commonArgs // {
+              buildInputs = commonArgs.buildInputs ++ [ onnxruntimePkg ];
             };
-          }
-        );
+            cargoArtifacts = craneLib.buildDepsOnly args;
+          in
+          craneLib.buildPackage (
+            args
+            // {
+              inherit cargoArtifacts;
+
+              postInstall = ''
+                # Install Python scripts alongside the binary
+                mkdir -p $out/share/waydeeper/scripts
+                cp ${./scripts/inpaint.py} $out/share/waydeeper/scripts/inpaint.py
+                cp ${./scripts/networks.py} $out/share/waydeeper/scripts/networks.py
+
+                wrapProgram $out/bin/waydeeper \
+                  --prefix PATH : ${inpaintPythonEnv}/bin \
+                  --prefix LD_LIBRARY_PATH : ${
+                    pkgs.lib.makeLibraryPath [
+                      pkgs.wayland
+                      pkgs.libGL
+                      pkgs.libglvnd
+                      pkgs.libxkbcommon
+                      onnxruntimePkg
+                    ]
+                  } \
+                  --set ORT_DYLIB_PATH "${onnxruntimePkg}/lib/libonnxruntime.so" \
+                  --set WAYDEEPER_INPAINT_SCRIPT "$out/share/waydeeper/scripts/inpaint.py"
+              '';
+
+              meta = with pkgs.lib; {
+                description = "GPU-accelerated depth effect wallpaper for Wayland";
+                license = licenses.mit;
+                platforms = platforms.linux;
+                mainProgram = "waydeeper";
+              };
+            }
+          );
+
+        # Package variants with different execution providers
+        waydeeper = buildWaydeeper pkgs.onnxruntime;
+        waydeeper-cuda = buildWaydeeper (pkgs.onnxruntime.override { cudaSupport = true; });
+        waydeeper-rocm = buildWaydeeper (pkgs.onnxruntime.override { rocmSupport = true; });
       in
       {
         packages = {
           default = waydeeper;
           waydeeper = waydeeper;
+          waydeeper-cuda = waydeeper-cuda;
+          waydeeper-rocm = waydeeper-rocm;
         };
 
         devShells.default = craneLib.devShell {
@@ -149,6 +160,7 @@
             libglvnd
             libxkbcommon
             openssl
+            # Dev shell uses CPU-only onnxruntime for fast, dependency-free builds
             onnxruntime
             # Python for 3D inpainting (optional — only needed when --inpaint is used)
             inpaintPythonEnv
@@ -174,7 +186,7 @@
           };
 
           shellHook = ''
-            echo "waydeeper-rust development environment"
+            echo "waydeeper development environment (CPU-only onnxruntime)"
             echo "  rustc: $(rustc --version)"
             echo "  cargo: $(cargo --version)"
             echo "  python: $(python3 --version 2>/dev/null || echo 'not found')"

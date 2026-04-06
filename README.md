@@ -9,7 +9,7 @@ https://github.com/user-attachments/assets/ea7e0999-1a28-4396-b9b1-a24a520aa6fd
 ## Features
 
 - **ML Depth Estimation**: Generates depth maps from any image using pre-trained ONNX models (Depth Anything V3, MiDaS, Depth Pro)
-- **GPU-Accelerated**: OpenGL ES 3.0 shaders render the parallax effect at full resolution
+- **GPU-Accelerated Rendering**: OpenGL ES 3.0 shaders render the parallax effect at full resolution
 - **3D Inpainting**: True parallax with correct occlusion using ML inpainting (edge/depth/color networks)
 - **Fractional HiDPI**: Exact pixel-perfect scaling via `wp_fractional_scale_v1` + `wp_viewporter`
 - **Lazy Animation**: Only animates when the mouse is active on the background surface, with configurable delay and idle timeout
@@ -60,6 +60,24 @@ Then add to your system or home packages:
 }
 ```
 
+#### GPU-Accelerated Inference (Nix)
+
+waydeeper provides separate package variants for different hardware backends. The `default` package uses CPU-only inference. Choose the variant that matches your GPU:
+
+| Package               | Execution Provider | Hardware    |
+| --------------------- | ------------------ | ----------- |
+| `waydeeper` (default) | CPU                | Any system  |
+| `waydeeper-cuda`      | CUDA               | NVIDIA GPUs |
+| `waydeeper-rocm`      | ROCm               | AMD GPUs    |
+
+```nix
+# Home Manager with CUDA support
+{ inputs, pkgs, ... }:
+{
+  home.packages = [ inputs.waydeeper.packages.${pkgs.system}.waydeeper-cuda ];
+}
+```
+
 #### Home Manager module
 
 Includes a systemd user service for auto-start:
@@ -106,7 +124,7 @@ sudo pacman -S --needed \
     base-devel cmake pkg-config rustup \
     wayland wayland-protocols \
     libxkbcommon libglvnd openssl
-# onnxruntime (select cpu variant)
+# onnxruntime (select your preferred variant)
 sudo pacman -S onnxruntime-cpu
 # Set up Rust
 rustup default stable

@@ -34,7 +34,7 @@ glow = "0.14"
 bytemuck = { version = "1", features = ["derive"] }
 
 # ONNX runtime (load-dynamic links to system libonnxruntime.so at runtime)
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "ndarray"] }
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "ndarray", "cuda", "rocm"] }
 ndarray = "0.17"
 
 # HTTP downloads

@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
+use ort::ep::{CPU, CUDA, ROCm};
+use ort::session::builder::GraphOptimizationLevel;
+
 use crate::cache::DepthCache;
 use crate::models::find_model_file;
 
@@ -72,8 +75,24 @@ impl DepthEstimator {
         let rgb_image = image.to_rgb8();
         let (original_width, original_height) = rgb_image.dimensions();
 
-        let mut session = ort::session::Session::builder()?
-            .commit_from_file(&self.model_path)?;
+        let mut builder = ort::session::Session::builder()
+            .map_err(|e| anyhow!("Failed to create session builder: {}", e))?;
+
+        builder = builder
+            .with_optimization_level(GraphOptimizationLevel::Level1)
+            .map_err(|e| anyhow!("Failed to set optimization level: {}", e))?;
+
+        builder = builder
+            .with_execution_providers([
+                CUDA::default().build(),
+                ROCm::default().build(),
+                CPU::default().build(),
+            ])
+            .map_err(|e| anyhow!("Failed to configure execution providers: {}", e))?;
+
+        let mut session = builder
+            .commit_from_file(&self.model_path)
+            .map_err(|e| anyhow!("Failed to load model from {}: {}", self.model_path, e))?;
 
         println!("Estimating depth...");
 
