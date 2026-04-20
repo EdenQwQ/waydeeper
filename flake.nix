@@ -36,28 +36,13 @@
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Python environment for 3D inpainting (used at runtime, not build time)
-        inpaintPythonEnv = pkgs.python3.withPackages (
-          ps: with ps; [
-            torch
-            numpy
-            scipy
-            pillow
-            networkx
-            matplotlib
-          ]
-        );
-
         # Common arguments for crane
         commonArgs = {
-          # Include .c and .py files in the source
+          # Include .c files in the source
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
             filter =
-              path: type:
-              (craneLib.filterCargoSources path type)
-              || (builtins.match ".*\\.c$" path != null)
-              || (builtins.match ".*\\.py$" path != null);
+              path: type: (craneLib.filterCargoSources path type) || (builtins.match ".*\\.c$" path != null);
           };
           strictDeps = true;
 
@@ -100,13 +85,7 @@
             inherit cargoArtifacts;
 
             postInstall = ''
-              # Install Python scripts alongside the binary
-              mkdir -p $out/share/waydeeper/scripts
-              cp ${./scripts/inpaint.py} $out/share/waydeeper/scripts/inpaint.py
-              cp ${./scripts/networks.py} $out/share/waydeeper/scripts/networks.py
-
               wrapProgram $out/bin/waydeeper \
-                --prefix PATH : ${inpaintPythonEnv}/bin \
                 --prefix LD_LIBRARY_PATH : ${
                   pkgs.lib.makeLibraryPath [
                     pkgs.wayland
@@ -116,8 +95,7 @@
                     pkgs.onnxruntime
                   ]
                 } \
-                --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime.so" \
-                --set WAYDEEPER_INPAINT_SCRIPT "$out/share/waydeeper/scripts/inpaint.py"
+                --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime.so"
             '';
 
             meta = with pkgs.lib; {
@@ -150,8 +128,6 @@
             libxkbcommon
             openssl
             onnxruntime
-            # Python for 3D inpainting (optional — only needed when --inpaint is used)
-            inpaintPythonEnv
             # Dev tools
             rust-analyzer
             clippy
@@ -177,11 +153,6 @@
             echo "waydeeper-rust development environment"
             echo "  rustc: $(rustc --version)"
             echo "  cargo: $(cargo --version)"
-            echo "  python: $(python3 --version 2>/dev/null || echo 'not found')"
-            # In the dev tree the scripts live in ./scripts/
-            if [ -f "scripts/inpaint.py" ]; then
-              export WAYDEEPER_INPAINT_SCRIPT="$(pwd)/scripts/inpaint.py"
-            fi
           '';
         };
       }

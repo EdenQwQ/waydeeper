@@ -240,7 +240,7 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
                     );
                     match wallpaper_result {
                         Ok((wallpaper, depth)) => {
-                            let ply_data = if result.use_inpaint {
+                            let ply_data = if result.use_3d {
                                 if let Some(ref ply_path) = result.ply_path {
                                     match EglRenderer::prepare_reload_mesh(ply_path) {
                                         Ok(p) => Some(p),
@@ -269,7 +269,7 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
                                 active_delay_ms: result.active_delay_ms,
                                 idle_timeout_ms: result.idle_timeout_ms,
                                 invert_depth: result.invert_depth,
-                                use_inpaint: result.use_inpaint,
+                                use_3d: result.use_3d,
                             };
                             *preparing.lock().unwrap() = Some(pending);
                         }
@@ -352,21 +352,20 @@ fn generate_reload_assets(params: &ReloadParams) -> Result<ReloadResult> {
     log::info!("Generating depth map for reload: {}...", wallpaper);
     let depth_path = daemon.ensure_depth_map_exists(wallpaper, model.as_deref(), params.regenerate)?;
 
-    let ply_path = if params.use_inpaint {
+    let ply_path = if params.use_3d {
         match daemon.ensure_ply_exists(
             wallpaper,
             &depth_path,
-            &params.inpaint_python,
             params.regenerate,
             params.invert_depth,
         ) {
             Ok(path) => {
-                log::info!("Inpaint mesh ready for reload: {}", path);
+                log::info!("3D mesh ready for reload: {}", path);
                 Some(path)
             }
             Err(err) => {
                 log::warn!(
-                    "Inpainting failed during reload, falling back to flat depth mode: {}",
+                    "Mesh generation failed during reload, falling back to flat depth mode: {}",
                     err
                 );
                 None
@@ -388,7 +387,7 @@ fn generate_reload_assets(params: &ReloadParams) -> Result<ReloadResult> {
         active_delay_ms: params.active_delay_ms,
         idle_timeout_ms: params.idle_timeout_ms,
         invert_depth: params.invert_depth,
-        use_inpaint: params.use_inpaint,
+        use_3d: params.use_3d,
     })
 }
 

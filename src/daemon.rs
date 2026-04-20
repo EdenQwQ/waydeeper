@@ -4,19 +4,18 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::cache::{DepthCache, InpaintCache};
+use crate::cache::{DepthCache, MeshCache};
 use crate::config;
 use crate::depth_estimator::DepthEstimator;
-use crate::inpaint::{self, InpaintConfig};
 use crate::ipc::{DaemonSocket, ReloadParams, ReloadState};
-use crate::models;
+use crate::mesh_gen::{self, MeshGenConfig};
 use crate::renderer;
 
 pub struct DepthWallpaperDaemon {
     config: config::Config,
     pub depth_estimator: Option<DepthEstimator>,
     cache_manager: Option<DepthCache>,
-    inpaint_cache: Option<InpaintCache>,
+    mesh_cache: Option<MeshCache>,
 }
 
 impl DepthWallpaperDaemon {
@@ -29,7 +28,7 @@ impl DepthWallpaperDaemon {
             config,
             depth_estimator: None,
             cache_manager: None,
-            inpaint_cache: None,
+            mesh_cache: None,
         })
     }
 
@@ -52,14 +51,14 @@ impl DepthWallpaperDaemon {
         Ok(())
     }
 
-    fn ensure_inpaint_cache_initialized(&mut self) -> Result<()> {
-        if self.inpaint_cache.is_none() {
+    fn ensure_mesh_cache_initialized(&mut self) -> Result<()> {
+        if self.mesh_cache.is_none() {
             let cache_dir = self
                 .config
                 .cache_directory
                 .as_ref()
                 .map(|path| std::path::Path::new(path.as_str()));
-            self.inpaint_cache = Some(InpaintCache::new(cache_dir)?);
+            self.mesh_cache = Some(MeshCache::new(cache_dir)?);
         }
         Ok(())
     }
@@ -68,7 +67,6 @@ impl DepthWallpaperDaemon {
         match model_path {
             Some(path) => {
                 let p = std::path::Path::new(path);
-                // For directory-format models (model.onnx inside a dir), use the parent dir name
                 if p.file_name().is_some_and(|n| n == "model.onnx") {
                     if let Some(parent) = p.parent() {
                         if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
@@ -122,44 +120,30 @@ impl DepthWallpaperDaemon {
         Ok(depth_path.to_string_lossy().to_string())
     }
 
-    /// Ensure a PLY inpaint mesh exists for the given image + depth map.
+    /// Ensure a PLY 3D mesh exists for the given image + depth map.
     pub fn ensure_ply_exists(
         &mut self,
         image_path: &str,
         depth_path: &str,
-        python: &str,
         force_regenerate: bool,
         invert_depth: bool,
     ) -> Result<String> {
-        if !models::inpaint_models_present() {
-            return Err(anyhow!(
-                "3D inpainting model weights not found in {}.\n\
-                 Run 'waydeeper download-model inpaint' to download them.",
-                models::inpaint_models_dir().display()
-            ));
-        }
+        self.ensure_mesh_cache_initialized()?;
 
-        self.ensure_inpaint_cache_initialized()?;
-
-        let img_p   = Path::new(image_path);
+        let img_p = Path::new(image_path);
         let depth_p = Path::new(depth_path);
 
-        let inpaint_cfg = InpaintConfig {
+        let mesh_cfg = MeshGenConfig {
             image_path: img_p,
             depth_path: depth_p,
             output_ply: Path::new("/dev/null"),
-            models_dir: &models::inpaint_models_dir(),
-            python,
             longer_side: 960,
-            depth_threshold: 0.04,
-            background_thickness: 70,
-            context_thickness: 140,
             extrapolation_thickness: 60,
             invert_depth,
         };
-        let tag = inpaint_cfg.cache_tag();
+        let tag = mesh_cfg.cache_tag();
 
-        let cache = self.inpaint_cache.as_ref().unwrap();
+        let cache = self.mesh_cache.as_ref().unwrap();
 
         if !force_regenerate {
             if let Some(cached_ply) = cache.get_cached_ply(img_p, depth_p, &tag)? {
@@ -169,22 +153,17 @@ impl DepthWallpaperDaemon {
 
         let output_ply = cache.ply_write_path(img_p, depth_p, &tag)?;
 
-        let inpaint_cfg = InpaintConfig {
+        let mesh_cfg = MeshGenConfig {
             image_path: img_p,
             depth_path: depth_p,
             output_ply: &output_ply,
-            models_dir: &models::inpaint_models_dir(),
-            python,
             longer_side: 960,
-            depth_threshold: 0.04,
-            background_thickness: 70,
-            context_thickness: 140,
             extrapolation_thickness: 60,
             invert_depth,
         };
 
-        println!("Running 3D inpainting...");
-        inpaint::run_inpainting(&inpaint_cfg)?;
+        println!("Generating 3D mesh...");
+        mesh_gen::generate(&mesh_cfg)?;
 
         Ok(output_ply.to_string_lossy().to_string())
     }
@@ -204,8 +183,8 @@ impl DepthWallpaperDaemon {
     pub fn clear_cache(&mut self) -> Result<()> {
         self.ensure_cache_initialized()?;
         self.cache_manager.as_ref().unwrap().clear_cache()?;
-        if let Ok(()) = self.ensure_inpaint_cache_initialized() {
-            self.inpaint_cache.as_ref().unwrap().clear_cache()?;
+        if let Ok(()) = self.ensure_mesh_cache_initialized() {
+            self.mesh_cache.as_ref().unwrap().clear_cache()?;
         }
         Ok(())
     }
@@ -243,8 +222,7 @@ impl DepthWallpaperDaemon {
         model_path: Option<&str>,
         regenerate: bool,
         invert_depth: bool,
-        use_inpaint: bool,
-        inpaint_python: &str,
+        use_3d: bool,
     ) -> Result<()> {
         let monitor_id = monitor.to_string();
         let running = Arc::new(AtomicBool::new(true));
@@ -295,13 +273,10 @@ impl DepthWallpaperDaemon {
             effective_config.model_path = Some(path.to_string());
         }
         effective_config.invert_depth = invert_depth;
-        effective_config.use_inpaint = use_inpaint;
-        effective_config.inpaint_python = inpaint_python.to_string();
+        effective_config.use_3d = use_3d;
 
         let initial_state = DaemonState {
             wallpaper_path: wallpaper_path.to_string(),
-            depth_path: String::new(),
-            ply_path: None,
             strength_x,
             strength_y,
             smooth_animation,
@@ -310,10 +285,9 @@ impl DepthWallpaperDaemon {
             active_delay_ms,
             idle_timeout_ms,
             invert_depth,
-            use_inpaint,
+            use_3d,
             model_path: effective_config.model_path.clone(),
             regenerate,
-            inpaint_python: inpaint_python.to_string(),
         };
 
         self.run_daemon_loop(&monitor_id, &running, &reload_state, initial_state)
@@ -324,33 +298,30 @@ impl DepthWallpaperDaemon {
         monitor_id: &str,
         running: &Arc<AtomicBool>,
         reload_state: &Arc<ReloadState>,
-        mut state: DaemonState,
+        state: DaemonState,
     ) -> Result<()> {
         let monitor_id = monitor_id.to_string();
 
-        // Initial asset generation
         let wallpaper = state.wallpaper_path.clone();
         let model = state.model_path.clone();
 
         log::info!("Generating depth map for {}...", wallpaper);
         let depth_path = self.ensure_depth_map_exists(&wallpaper, model.as_deref(), state.regenerate)?;
-        state.depth_path = depth_path.clone();
 
-        let ply_path = if state.use_inpaint {
+        let ply_path = if state.use_3d {
             match self.ensure_ply_exists(
                 &wallpaper,
                 &depth_path,
-                &state.inpaint_python,
                 state.regenerate,
                 state.invert_depth,
             ) {
                 Ok(path) => {
-                    log::info!("Inpaint mesh ready: {}", path);
+                    log::info!("3D mesh ready: {}", path);
                     Some(path)
                 }
                 Err(err) => {
                     log::warn!(
-                        "Inpainting failed, falling back to flat depth mode: {}",
+                        "Mesh generation failed, falling back to flat depth mode: {}",
                         err
                     );
                     None
@@ -359,9 +330,7 @@ impl DepthWallpaperDaemon {
         } else {
             None
         };
-        state.ply_path = ply_path.clone();
 
-        // Start IPC socket and renderer
         let mut socket = DaemonSocket::new(&monitor_id)?;
         let running_for_handler = running.clone();
         let monitor_for_handler = monitor_id.clone();
@@ -419,7 +388,6 @@ impl DepthWallpaperDaemon {
             ply_path: ply_path.clone(),
         };
 
-        // Run renderer — it handles reload checking internally
         crate::wayland::run(render_config, running.clone(), reload_state.clone())?;
 
         if !running.load(Ordering::SeqCst) {
@@ -432,8 +400,6 @@ impl DepthWallpaperDaemon {
 
 struct DaemonState {
     wallpaper_path: String,
-    depth_path: String,
-    ply_path: Option<String>,
     strength_x: f64,
     strength_y: f64,
     smooth_animation: bool,
@@ -442,8 +408,7 @@ struct DaemonState {
     active_delay_ms: f64,
     idle_timeout_ms: f64,
     invert_depth: bool,
-    use_inpaint: bool,
+    use_3d: bool,
     model_path: Option<String>,
     regenerate: bool,
-    inpaint_python: String,
 }

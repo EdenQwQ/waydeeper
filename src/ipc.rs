@@ -21,10 +21,9 @@ pub struct ReloadParams {
     pub active_delay_ms: f64,
     pub idle_timeout_ms: f64,
     pub invert_depth: bool,
-    pub use_inpaint: bool,
+    pub use_3d: bool,
     pub model_path: Option<String>,
     pub regenerate: bool,
-    pub inpaint_python: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +39,7 @@ pub struct ReloadResult {
     pub active_delay_ms: f64,
     pub idle_timeout_ms: f64,
     pub invert_depth: bool,
-    pub use_inpaint: bool,
+    pub use_3d: bool,
 }
 
 pub struct ReloadState {

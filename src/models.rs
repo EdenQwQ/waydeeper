@@ -56,32 +56,6 @@ pub const MODEL_EXTRA_FILES: &[(&str, &[(&str, &str)])] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Inpainting model constants
-// ---------------------------------------------------------------------------
-
-pub const INPAINT_MODEL_NAMES: &[&str] = &["edge-model", "depth-model", "color-model"];
-
-pub const INPAINT_URLS: &[(&str, &str)] = &[
-    ("edge-model.pth",
-     "https://huggingface.co/spaces/Epoching/3D_Photo_Inpainting/resolve/e389e564fd2a55cfa4582be8c8239295d102aebd/checkpoints/edge-model.pth"),
-    ("depth-model.pth",
-     "https://huggingface.co/spaces/Epoching/3D_Photo_Inpainting/resolve/e389e564fd2a55cfa4582be8c8239295d102aebd/checkpoints/depth-model.pth"),
-    ("color-model.pth",
-     "https://huggingface.co/spaces/Epoching/3D_Photo_Inpainting/resolve/e389e564fd2a55cfa4582be8c8239295d102aebd/checkpoints/color-model.pth"),
-];
-
-/// Return the directory that holds the inpainting .pth weights.
-pub fn inpaint_models_dir() -> PathBuf {
-    models_dir().join("inpaint")
-}
-
-/// Check whether all three inpainting model .pth files are present.
-pub fn inpaint_models_present() -> bool {
-    let dir = inpaint_models_dir();
-    INPAINT_MODEL_NAMES.iter().all(|name| dir.join(format!("{}.pth", name)).exists())
-}
-
-// ---------------------------------------------------------------------------
 // Model lookup
 // ---------------------------------------------------------------------------
 

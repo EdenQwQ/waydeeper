@@ -133,12 +133,12 @@ enum Commands {
         /// Depth model name (depth-anything-v3-base, midas-small, depth-pro-q4) or path to .onnx file
         #[arg(long)]
         model: Option<String>,
-        /// Enable 3D inpainting for true parallax with occlusion
-        #[arg(long)]
-        inpaint: bool,
-        /// Disable 3D inpainting mode
-        #[arg(long)]
-        no_inpaint: bool,
+        /// Enable 3D mesh mode (perspective parallax with generated mesh)
+        #[arg(long = "3d")]
+        three_d: bool,
+        /// Disable 3D mesh mode
+        #[arg(long = "no-3d")]
+        no_three_d: bool,
         /// Invert depth interpretation (near ↔ far)
         #[arg(long)]
         invert_depth: bool,
@@ -172,7 +172,7 @@ enum Commands {
         /// Idle timeout in ms before animation stops (default: 500)
         #[arg(long)]
         idle_timeout: Option<f64>,
-        /// Force regenerate depth map and inpaint mesh
+        /// Force regenerate depth map and 3D mesh
         #[arg(long)]
         regenerate: bool,
     },
@@ -185,7 +185,7 @@ enum Commands {
         /// Target monitor name, or omit to start all configured monitors
         #[arg(short, long)]
         monitor: Option<String>,
-        /// Force regenerate depth map and inpaint mesh
+        /// Force regenerate depth map and 3D mesh
         #[arg(long)]
         regenerate: bool,
         /// Enable verbose logging
@@ -203,20 +203,20 @@ enum Commands {
     /// List connected Wayland monitors and their wallpaper status.
     ListMonitors,
 
-    /// Pre-generate depth map and optionally inpaint mesh without starting a daemon.
+    /// Pre-generate depth map and optionally 3D mesh without starting a daemon.
     Pregenerate {
         /// Path to the wallpaper image
         image: String,
         /// Depth model name (depth-anything-v3-base, midas-small, depth-pro-q4) or path
         #[arg(long)]
         model: Option<String>,
-        /// Enable 3D inpainting for true parallax with occlusion
-        #[arg(long)]
-        inpaint: bool,
+        /// Enable 3D mesh generation
+        #[arg(long = "3d")]
+        three_d: bool,
         /// Invert depth interpretation (near ↔ far)
         #[arg(long)]
         invert_depth: bool,
-        /// Force regenerate depth map and inpaint mesh
+        /// Force regenerate depth map and 3D mesh
         #[arg(long)]
         regenerate: bool,
         /// Enable verbose logging
@@ -224,7 +224,7 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Manage the depth map and inpaint mesh cache.
+    /// Manage the depth map and 3D mesh cache.
     Cache {
         /// Clear all cached depth maps and meshes
         #[arg(long, group = "action")]
@@ -234,9 +234,9 @@ enum Commands {
         list: bool,
     },
 
-    /// Download ONNX depth models and 3D inpainting networks.
+    /// Download ONNX depth models.
     DownloadModel {
-        /// Model to download: 'depth-anything-v3-base', 'midas-small', 'depth-pro-q4', or 'inpaint'
+        /// Model to download: 'depth-anything-v3-base', 'midas-small', or 'depth-pro-q4'
         model: Option<String>,
     },
 
@@ -269,10 +269,8 @@ enum Commands {
         regenerate: bool,
         #[arg(long)]
         invert_depth: bool,
-        #[arg(long)]
-        inpaint: bool,
-        #[arg(long, default_value = "python3")]
-        inpaint_python: String,
+        #[arg(long = "3d")]
+        three_d: bool,
     },
 }
 
@@ -310,8 +308,8 @@ fn handle_command(command: Commands) -> Result<()> {
             regenerate,
             invert_depth,
             no_invert_depth,
-            inpaint,
-            no_inpaint,
+            three_d,
+            no_three_d,
         } => cmd_set(
             image.as_deref(),
             AnimationParams {
@@ -330,8 +328,8 @@ fn handle_command(command: Commands) -> Result<()> {
             regenerate,
             invert_depth,
             no_invert_depth,
-            inpaint,
-            no_inpaint,
+            three_d,
+            no_three_d,
         ),
 
         Commands::Daemon {
@@ -348,9 +346,9 @@ fn handle_command(command: Commands) -> Result<()> {
             verbose,
             model,
             regenerate,
-            inpaint,
+            three_d,
             invert_depth,
-        } => cmd_pregenerate(&image, verbose, model.as_deref(), regenerate, inpaint, invert_depth),
+        } => cmd_pregenerate(&image, verbose, model.as_deref(), regenerate, three_d, invert_depth),
 
         Commands::Cache { clear, list } => handle_cache_command(clear, list),
         Commands::DownloadModel { model } => cmd_download_model(model.as_deref()),
@@ -369,8 +367,7 @@ fn handle_command(command: Commands) -> Result<()> {
             model,
             regenerate,
             invert_depth,
-            inpaint,
-            inpaint_python,
+            three_d,
         } => cmd_daemon_run(
             &wallpaper,
             &monitor,
@@ -385,8 +382,7 @@ fn handle_command(command: Commands) -> Result<()> {
             model.as_deref(),
             regenerate,
             invert_depth,
-            inpaint,
-            &inpaint_python,
+            three_d,
         ),
     }
 }
@@ -414,8 +410,7 @@ fn spawn_daemon(
     model_path: Option<&str>,
     regenerate: bool,
     invert_depth: bool,
-    use_inpaint: bool,
-    inpaint_python: &str,
+    use_3d: bool,
     verbose: bool,
 ) -> Result<std::process::Child> {
     let executable = std::env::current_exe()?;
@@ -435,16 +430,14 @@ fn spawn_daemon(
     if let Some(path) = model_path {
         command.arg("--model").arg(path);
     }
-    if regenerate       { command.arg("--regenerate"); }
-    if invert_depth     { command.arg("--invert-depth"); }
-    if use_inpaint      { command.arg("--inpaint"); }
+    if regenerate   { command.arg("--regenerate"); }
+    if invert_depth { command.arg("--invert-depth"); }
+    if use_3d       { command.arg("--3d"); }
     if params.smooth_animation {
         command.arg("--smooth-animation");
     } else {
         command.arg("--no-smooth-animation");
     }
-
-    command.arg("--inpaint-python").arg(inpaint_python);
 
     if verbose {
         command.env("RUST_LOG", "debug");
@@ -512,8 +505,7 @@ fn send_reload(
     model_path: Option<&str>,
     regenerate: bool,
     invert_depth: bool,
-    use_inpaint: bool,
-    inpaint_python: &str,
+    use_3d: bool,
 ) -> Result<()> {
     let client = DaemonClient::new(monitor)?;
     let reload_params = ReloadParams {
@@ -526,10 +518,9 @@ fn send_reload(
         active_delay_ms: params.active_delay,
         idle_timeout_ms: params.idle_timeout,
         invert_depth,
-        use_inpaint,
+        use_3d,
         model_path: model_path.map(|s| s.to_string()),
         regenerate,
-        inpaint_python: inpaint_python.to_string(),
     };
     let response = client.send_command("RELOAD", json!(reload_params), Duration::from_secs(10))?;
     if !response.success {
@@ -580,8 +571,8 @@ fn cmd_set(
     regenerate: bool,
     invert_depth: bool,
     no_invert_depth: bool,
-    use_inpaint: bool,
-    no_inpaint: bool,
+    use_3d: bool,
+    no_3d: bool,
 ) -> Result<()> {
     let image_path_string = match image {
         Some(path) => {
@@ -646,14 +637,13 @@ fn cmd_set(
         } else {
             mon_config.invert_depth
         };
-        let do_use_inpaint = if use_inpaint {
+        let do_use_3d = if use_3d {
             true
-        } else if no_inpaint {
+        } else if no_3d {
             false
         } else {
-            mon_config.use_inpaint
+            mon_config.use_3d
         };
-        let inpaint_python = &mon_config.inpaint_python;
 
         // Update config with only explicitly provided parameters
         {
@@ -706,11 +696,11 @@ fn cmd_set(
             if no_invert_depth {
                 monitor_config.invert_depth = false;
             }
-            if use_inpaint {
-                monitor_config.use_inpaint = true;
+            if use_3d {
+                monitor_config.use_3d = true;
             }
-            if no_inpaint {
-                monitor_config.use_inpaint = false;
+            if no_3d {
+                monitor_config.use_3d = false;
             }
 
             config::save_config(&config)?;
@@ -727,8 +717,7 @@ fn cmd_set(
                     eff_model,
                     regenerate,
                     do_invert_depth,
-                    do_use_inpaint,
-                    inpaint_python,
+                    do_use_3d,
                 )?;
                 println!("Wallpaper daemon reloaded for monitor {}.", monitor_id);
                 reloaded += 1;
@@ -745,8 +734,7 @@ fn cmd_set(
             eff_model,
             regenerate,
             do_invert_depth,
-            do_use_inpaint,
-            inpaint_python,
+            do_use_3d,
             false,
         )?;
 
@@ -863,8 +851,7 @@ fn cmd_daemon(monitor: Option<&str>, regenerate: bool, verbose: bool) -> Result<
             effective_model,
             regenerate,
             monitor_config.invert_depth,
-            monitor_config.use_inpaint,
-            &monitor_config.inpaint_python,
+            monitor_config.use_3d,
             verbose,
         ) {
             Ok(mut child) => {
@@ -915,8 +902,7 @@ fn cmd_daemon_run(
     model: Option<&str>,
     regenerate: bool,
     invert_depth: bool,
-    use_inpaint: bool,
-    inpaint_python: &str,
+    use_3d: bool,
 ) -> Result<()> {
     let smooth_animation = if no_smooth_animation { false } else { smooth_animation };
     
@@ -936,8 +922,7 @@ fn cmd_daemon_run(
         model,
         regenerate,
         invert_depth,
-        use_inpaint,
-        inpaint_python,
+        use_3d,
     )
 }
 
@@ -991,7 +976,7 @@ fn cmd_list_monitors() -> Result<()> {
         for (monitor_id, monitor_config) in &config.monitors {
             let wallpaper = monitor_config.wallpaper_path.as_deref().unwrap_or("Not set");
             let status = if running.contains(&monitor_id.to_string()) { "running" } else { "stopped" };
-            let mode = if monitor_config.use_inpaint { "3D inpaint" } else { "flat depth-warp" };
+            let mode = if monitor_config.use_3d { "3D mesh" } else { "flat depth-warp" };
 
             println!("  Monitor {}:", monitor_id);
             println!("    Status:       {}", status);
@@ -1018,7 +1003,7 @@ fn cmd_pregenerate(
     _verbose: bool,
     model: Option<&str>,
     regenerate: bool,
-    use_inpaint: bool,
+    use_3d: bool,
     invert_depth: bool,
 ) -> Result<()> {
     let image_path = std::fs::canonicalize(image)
@@ -1053,18 +1038,17 @@ fn cmd_pregenerate(
         }
     };
 
-    if use_inpaint {
-        println!("Generating 3D inpaint mesh...");
+    if use_3d {
+        println!("Generating 3D mesh...");
         match daemon.ensure_ply_exists(
             &image_path_string,
             &depth_path,
-            "python3",
             regenerate,
             invert_depth,
         ) {
-            Ok(ply) => println!("Inpaint mesh ready: {}", ply),
+            Ok(ply) => println!("3D mesh ready: {}", ply),
             Err(e)  => {
-                println!("Inpainting failed: {}", e);
+                println!("Mesh generation failed: {}", e);
                 return Err(e);
             }
         }
@@ -1194,18 +1178,13 @@ fn cmd_download_model(model_name: Option<&str>) -> Result<()> {
     let models_dir = config::models_dir();
     std::fs::create_dir_all(&models_dir)?;
 
-    // "inpaint" is a special shortcut
-    if model_name == Some("inpaint") {
-        return cmd_download_inpaint_models();
-    }
-
     // Download a specific named model (skip if already present)
     if let Some(name) = model_name {
         let model_info = models::get_model(name)?.clone();
         return download_depth_model(&model_info);
     }
 
-    // Interactive flow: depth model first, then ask about inpainting
+    // Interactive flow: depth model selection
     let selected_name = models::prompt_model_selection()?;
     let model_info = models::get_model(&selected_name)?.clone();
 
@@ -1213,19 +1192,6 @@ fn cmd_download_model(model_name: Option<&str>) -> Result<()> {
         println!("{} already installed, skipping download.", model_info.name);
     } else {
         download_depth_model(&model_info)?;
-    }
-
-    // Then ask about inpainting
-    if models::inpaint_models_present() {
-        println!("\nInpainting models already installed.");
-    } else {
-        print!("\nDownload 3D inpainting models? (~250 MB) [y/N]: ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if input.trim().to_lowercase() == "y" {
-            cmd_download_inpaint_models()?;
-        }
     }
 
     Ok(())
@@ -1308,23 +1274,3 @@ fn download_depth_model(model_info: &models::ModelInfo) -> Result<()> {
     Ok(())
 }
 
-fn cmd_download_inpaint_models() -> Result<()> {
-    let inpaint_dir = models::inpaint_models_dir();
-    std::fs::create_dir_all(&inpaint_dir)?;
-
-    for (filename, url) in models::INPAINT_URLS {
-        let dest = inpaint_dir.join(filename);
-        if dest.exists() {
-            println!("{} already present, skipping.", filename);
-            continue;
-        }
-
-        println!("Downloading {}...", filename);
-        download_with_progress(url, &dest, filename)?;
-        println!("  Saved to {}", dest.display());
-    }
-
-    println!("\nAll inpainting models downloaded to {}", inpaint_dir.display());
-    println!("Run: waydeeper set <image> --inpaint");
-    Ok(())
-}

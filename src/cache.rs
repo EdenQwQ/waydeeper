@@ -197,20 +197,20 @@ pub fn save_depth_map(depth_data: &[f32], width: u32, height: u32, path: &Path) 
 }
 
 // ---------------------------------------------------------------------------
-// Inpaint PLY cache
+// 3D mesh PLY cache
 // ---------------------------------------------------------------------------
 
 /// Cache that maps (image, depth_map, config_version) → PLY file on disk.
-pub struct InpaintCache {
+pub struct MeshCache {
     ply_directory: PathBuf,
 }
 
-impl InpaintCache {
+impl MeshCache {
     pub fn new(custom_directory: Option<&Path>) -> Result<Self> {
         let base = custom_directory
             .map(|p| p.to_path_buf())
             .unwrap_or_else(crate::config::cache_dir);
-        let ply_directory = base.join("inpaint");
+        let ply_directory = base.join("mesh");
         std::fs::create_dir_all(&ply_directory)?;
         Ok(Self { ply_directory })
     }
@@ -250,7 +250,7 @@ impl InpaintCache {
         let hash = self.compute_hash(image_path, depth_path, config_tag)?;
         let path = self.ply_path(&hash);
         if path.exists() {
-            log::debug!("Inpaint cache hit: {}", path.display());
+            log::debug!("Mesh cache hit: {}", path.display());
             Ok(Some(path))
         } else {
             Ok(None)
@@ -274,7 +274,7 @@ impl InpaintCache {
                 std::fs::remove_file(entry.path())?;
             }
         }
-        log::info!("Inpaint cache cleared");
+        log::info!("Mesh cache cleared");
         Ok(())
     }
 }

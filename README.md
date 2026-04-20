@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/ea7e0999-1a28-4396-b9b1-a24a520aa6fd
 
 - **ML Depth Estimation**: Generates depth maps from any image using pre-trained ONNX models (Depth Anything V3, MiDaS, Depth Pro)
 - **GPU-Accelerated**: OpenGL ES 3.0 shaders render the parallax effect at full resolution
-- **3D Inpainting**: True parallax with correct occlusion using ML inpainting (edge/depth/color networks)
+- **3D Mesh Mode**: Optional perspective-projected mesh generated from image + depth map for a stronger parallax effect
 - **Fractional HiDPI**: Exact pixel-perfect scaling via `wp_fractional_scale_v1` + `wp_viewporter`
 - **Lazy Animation**: Only animates when the mouse is active on the background surface, with configurable delay and idle timeout
 - **Smart Caching**: Depth maps cached with blake2b hashing; model-aware cache invalidation
@@ -80,20 +80,17 @@ Includes a systemd user service for auto-start:
 git clone https://github.com/EdenQwQ/waydeeper.git
 cd waydeeper
 # Installs to ~/.local/bin (user) or /usr/local/bin (root)
-# Prompts for inpainting support and model download
+# Prompts for depth model download
 bash install.sh
 
 # Or force user install:
 bash install.sh --user
 
-# Or include inpainting without prompting:
-bash install.sh --with-inpaint
-
 # Or custom prefix:
 bash install.sh --prefix /opt/waydeeper
 ```
 
-The script builds the binary, checks for missing dependencies, optionally sets up inpainting (Python deps + scripts), and prompts you to download depth models.
+The script builds the binary, checks for missing dependencies, and prompts you to download depth models.
 
 #### Manual build
 
@@ -135,14 +132,9 @@ The binary will be at `target/release/waydeeper`.
 **3. Install manually**
 
 ```bash
-# Copy binary and scripts
 sudo cp target/release/waydeeper /usr/local/bin/
-sudo mkdir -p /usr/local/share/waydeeper/scripts
-sudo cp scripts/inpaint.py scripts/networks.py /usr/local/share/waydeeper/scripts/
-
-# Or with cargo install (scripts must be placed separately)
+# Or with cargo install
 cargo install --path .
-export WAYDEEPER_INPAINT_SCRIPT=/path/to/waydeeper/scripts/inpaint.py
 ```
 
 **4. Configure ONNX Runtime path**
@@ -181,55 +173,6 @@ Models are stored in `~/.local/share/waydeeper/models/`.
 
 Downloads respect `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`
 environment variables.
-
-### Download 3D Inpainting Models (optional)
-
-Required only for `--inpaint` mode. This mode uses a 3D-photo-inpainting pipeline
-(edge/depth/color networks) to synthesise background behind foreground objects,
-producing true parallax with correct occlusion instead of a flat UV warp.
-
-**If you used `install.sh`**, inpainting Python dependencies were handled automatically
-(if you opted in). If you built manually, you'll need:
-
-- Python 3 with `torch`, `scipy`, `networkx`, and `Pillow`
-
-**Arch Linux:**
-
-```bash
-sudo pacman -S python python-pip python-numpy python-scipy python-pillow python-networkx python-matplotlib
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-```
-
-**Ubuntu / Debian:**
-
-```bash
-sudo apt install -y python3-pip python3-numpy python3-scipy python3-pil python3-networkx python3-matplotlib
-pip3 install torch --index-url https://download.pytorch.org/whl/cpu --break-system-packages
-```
-
-The inpainting scripts are installed automatically by `install.sh`. If you built
-manually, point waydeeper to them:
-
-```bash
-export WAYDEEPER_INPAINT_SCRIPT=/path/to/waydeeper/scripts/inpaint.py
-```
-
-```bash
-waydeeper download-model inpaint
-```
-
-Downloads three checkpoints to `~/.local/share/waydeeper/models/inpaint/`:
-
-| File              | Purpose                                 |
-| ----------------- | --------------------------------------- |
-| `edge-model.pth`  | Predicts edge patterns around occlusion |
-| `depth-model.pth` | Inpaints depth in synthesised regions   |
-| `color-model.pth` | Fills color in synthesised regions      |
-
-> **Note:** The ONNX depth model (Depth Anything V3, MiDaS, Depth Pro) generates the _initial_ depth
-> map from the full image. `depth-model.pth` is a separate network used _only_
-> during 3D inpainting to fill depth in occlusion holes. Both are needed for
-> inpaint mode.
 
 ## Usage
 
@@ -270,27 +213,27 @@ waydeeper set /path/to/wallpaper.jpg --model depth-pro-q4
 waydeeper set /path/to/wallpaper.jpg --model /path/to/custom/model.onnx
 ```
 
-### 3D Inpainting mode
+### 3D mesh mode
 
-Uses ML inpainting to synthesise background behind foreground objects, producing
-true parallax with correct occlusion. First run generates a 3D mesh from your image;
-subsequent runs use the cached mesh.
-
-The mesh generator uses graph-based topology (from 3d-photo-inpainting) with
-depth-aware edge tearing to prevent stretching artifacts at depth discontinuities.
+Generates a 3D perspective mesh from the image and depth map for a stronger
+parallax effect than the default flat depth-warp. The mesh is produced in pure
+Rust — no Python, no extra ML models — and cached after the first run.
 
 ```bash
-# Enable 3D inpainting
-waydeeper set /path/to/wallpaper.jpg --inpaint
+# Enable 3D mesh mode
+waydeeper set /path/to/wallpaper.jpg --3d
 
 # Adjust parallax strength
-waydeeper set /path/to/wallpaper.jpg --inpaint --strength-x 0.05 --strength-y 0.02
+waydeeper set /path/to/wallpaper.jpg --3d --strength-x 0.05 --strength-y 0.02
 
-# Regenerate both depth map and mesh
-waydeeper set /path/to/wallpaper.jpg --inpaint --regenerate
+# Regenerate depth map and mesh
+waydeeper set /path/to/wallpaper.jpg --3d --regenerate
 
 # Pregenerate mesh without starting daemon
-waydeeper pregenerate /path/to/wallpaper.jpg --inpaint
+waydeeper pregenerate /path/to/wallpaper.jpg --3d
+
+# Disable and go back to flat mode
+waydeeper set --no-3d
 ```
 
 ### Start daemon for all configured monitors
@@ -328,14 +271,11 @@ waydeeper list-monitors
 # Pregenerate depth map (saves time later)
 waydeeper pregenerate /path/to/wallpaper.jpg
 
-# Pregenerate depth map + inpaint mesh
-waydeeper pregenerate /path/to/wallpaper.jpg --inpaint
+# Pregenerate depth map + 3D mesh
+waydeeper pregenerate /path/to/wallpaper.jpg --3d
 
 # Download depth estimation models
 waydeeper download-model depth-anything-v3-base
-
-# Download inpainting models
-waydeeper download-model inpaint
 
 # Manage cache
 waydeeper cache --list
@@ -360,8 +300,7 @@ Stored in `~/.config/waydeeper/config.json`:
       "idle_timeout_ms": 5000,
       "model_path": "~/.local/share/waydeeper/models/depth-anything-v3-base/model.onnx",
       "invert_depth": false,
-      "use_inpaint": false,
-      "inpaint_python": "python3"
+      "use_3d": false
     }
   }
 }
@@ -378,15 +317,14 @@ Stored in `~/.config/waydeeper/config.json`:
 | `idle_timeout_ms`  | 5000      | Time before animation stops after mouse is idle  |
 | `model_path`       | —         | Path to ONNX model                               |
 | `invert_depth`     | false     | Invert depth interpretation                      |
-| `use_inpaint`      | false     | Enable 3D inpainting mode                        |
-| `inpaint_python`   | `python3` | Python interpreter for inpainting subprocess     |
+| `use_3d`           | false     | Enable 3D perspective mesh mode                  |
 
 ### Cache
 
 Depth maps are cached in `~/.cache/waydeeper/depth/` with model-specific keys.
-Inpaint PLY meshes are cached in `~/.cache/waydeeper/inpaint/` keyed by image
+3D mesh PLY files are cached in `~/.cache/waydeeper/mesh/` keyed by image
 content, depth map, and mesh parameters. The same image with different depth
-models or inpaint settings produces separate cache entries.
+models or mesh settings produces separate cache entries.
 
 ## Architecture
 
@@ -398,11 +336,11 @@ src/
                        daemon: spawn new daemons, skip running
   config.rs          - JSON config management
   models.rs          - Model registry and download URLs
-  cache.rs           - Blake2b-hashed depth map + inpaint mesh cache
+  cache.rs           - Blake2b-hashed depth map + 3D mesh cache
   ipc.rs             - Unix domain socket IPC with reload state tracking
   depth_estimator.rs - ONNX inference + Lanczos resize + Gaussian blur
   daemon.rs          - DepthWallpaperDaemon with background reload state machine
-  inpaint.rs         - Python subprocess launcher for 3D inpainting
+  mesh_gen.rs        - Pure-Rust 3D mesh generation (image + depth → PLY)
   mesh.rs            - Binary/ASCII PLY parser with UV + FoV metadata
   math.rs            - Perspective/translation 4×4 matrix helpers
   renderer.rs        - EGL context, GLSL shaders, flat + mesh modes
@@ -410,10 +348,6 @@ src/
   wayland.rs         - smithay-client-toolkit layer-shell + fractional scaling
                        Background reload thread, in-place texture swap
   egl_bridge.c       - C FFI for EGL/Wayland bridge
-scripts/
-  inpaint.py         - 3D inpainting pipeline with graph-based mesh generation
-                       Edge tearing at depth discontinuities, dangling edge removal
-  networks.py        - Neural network architectures (from 3d-photo-inpainting)
 ```
 
 ## Acknowledgements
@@ -427,7 +361,6 @@ Special thanks to:
 
 - [lively wallpaper](https://github.com/rocksdanister/lively) — this project is inspired by its depth effect wallpaper feature. waydeeper started as a Wayland implementation of that Windows app's depth wallpaper functionality
 - [Depth Anything V3](https://github.com/ByteDance-Seed/depth-anything-3), [MiDaS](https://github.com/isl-org/MiDaS), and [Depth Pro](https://github.com/apple/ml-depth-pro) for depth estimation
-- [3D Photo Inpainting](https://github.com/vt-vl-lab/3d-photo-inpainting) for the mesh inpainting pipeline
 - [rocksdanister](https://github.com/rocksdanister) for [ONNX model weights](https://github.com/rocksdanister/lively-ml-models/releases)
 - [awww](https://github.com/BC100Dev/awww) for Wayland wallpaper daemon reference
 - [smithay-client-toolkit](https://github.com/Smithay/client-toolkit) for the Wayland client library

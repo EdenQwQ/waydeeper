@@ -25,10 +25,9 @@ pub struct MonitorConfig {
     pub model_path: Option<String>,
     #[serde(default)]
     pub invert_depth: bool,
-    #[serde(default)]
-    pub use_inpaint: bool,
-    #[serde(default = "default_python")]
-    pub inpaint_python: String,
+    /// Enable 3D mesh mode (renamed from `use_inpaint`).
+    #[serde(default, alias = "use_inpaint")]
+    pub use_3d: bool,
 }
 
 impl Default for MonitorConfig {
@@ -44,8 +43,7 @@ impl Default for MonitorConfig {
             idle_timeout_ms: 5000.0,
             model_path: None,
             invert_depth: false,
-            use_inpaint: false,
-            inpaint_python: "python3".to_string(),
+            use_3d: false,
         }
     }
 }
@@ -56,7 +54,6 @@ fn default_animation_speed() -> f64 { 0.05 }
 fn default_fps() -> u32 { 60 }
 fn default_active_delay() -> f64 { 150.0 }
 fn default_idle_timeout() -> f64 { 5000.0 }
-fn default_python() -> String { "python3".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(Default)]

@@ -152,7 +152,7 @@ pub struct PendingReload {
     pub active_delay_ms: f64,
     pub idle_timeout_ms: f64,
     pub invert_depth: bool,
-    pub use_inpaint: bool,
+    pub use_3d: bool,
 }
 
 pub struct PlyPrepared {
@@ -717,7 +717,7 @@ impl EglRenderer {
         self.config.active_delay_ms = pending.active_delay_ms;
         self.config.idle_timeout_ms = pending.idle_timeout_ms;
         self.config.invert_depth = pending.invert_depth;
-        if pending.use_inpaint {
+        if pending.use_3d {
             if let Some(ref ply_path) = pending.ply_path {
                 self.config.ply_path = Some(ply_path.clone());
             }
