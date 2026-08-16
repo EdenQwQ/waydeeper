@@ -456,10 +456,10 @@ fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::C
     let delay_ms = 500;
     let max_attempts = (timeout_secs * 1000 / delay_ms) as u32;
     let mut dots = 0;
-    
+
     for _ in 0..max_attempts {
         std::thread::sleep(Duration::from_millis(delay_ms));
-        
+
         match child.try_wait() {
             Ok(Some(status)) => {
                 println!();
@@ -473,7 +473,7 @@ fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::C
                 return false;
             }
         }
-        
+
         if let Ok(client) = DaemonClient::new(monitor) {
             if client.is_running() {
                 println!();
@@ -491,7 +491,33 @@ fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::C
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
     println!();
+
+    // The daemon never became IPC-responsive within the timeout (e.g. a slow
+    // model still generating the depth map/mesh). Leaving it running would
+    // create an orphaned process that `waydeeper stop` can't see yet (it has
+    // no socket) and that keeps competing for CPU/GPU with daemons for other
+    // monitors. Kill it so the caller can retry cleanly instead of ending up
+    // with an unkillable "ghost" daemon.
+    println!("Killing unresponsive daemon process for monitor {}...", monitor);
+    kill_child(child);
     false
+}
+
+/// Terminate a child process: try SIGTERM first, escalate to SIGKILL if it
+/// doesn't exit promptly, then reap it so it doesn't linger as a zombie.
+fn kill_child(child: &mut std::process::Child) {
+    let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 // ---------------------------------------------------------------------------
