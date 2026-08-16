@@ -293,7 +293,16 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
 
         // Check if background texture preparation is done — capture old wallpaper, upload new, transition
         if let Some(pending) = preparing_reload.lock().unwrap().take() {
-            // Capture current frame (old wallpaper) right before the swap
+            // Render one frame with the still-current (old) textures so the
+            // backbuffer actually holds valid, freshly-drawn pixels. Without
+            // this, start_transition()'s framebuffer snapshot below reads
+            // whatever was left in the backbuffer after the *previous*
+            // swap_buffers() call — which EGL does not guarantee to preserve
+            // (default swap behavior is "buffer destroyed"), so the "old
+            // wallpaper" snapshot ends up garbage/stale and the transition
+            // is invisible even though nothing errors.
+            let _ = app.renderer.draw();
+            // Capture that just-drawn frame (old wallpaper) right before the swap
             if let Err(e) = app.renderer.start_transition() {
                 log::warn!("Transition start failed: {}", e);
             }
