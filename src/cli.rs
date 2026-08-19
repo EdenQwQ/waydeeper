@@ -456,10 +456,10 @@ fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::C
     let delay_ms = 500;
     let max_attempts = (timeout_secs * 1000 / delay_ms) as u32;
     let mut dots = 0;
-    
+
     for _ in 0..max_attempts {
         std::thread::sleep(Duration::from_millis(delay_ms));
-        
+
         match child.try_wait() {
             Ok(Some(status)) => {
                 println!();
@@ -473,7 +473,7 @@ fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::C
                 return false;
             }
         }
-        
+
         if let Ok(client) = DaemonClient::new(monitor) {
             if client.is_running() {
                 println!();
@@ -491,7 +491,33 @@ fn wait_for_daemon(monitor: &str, timeout_secs: u64, child: &mut std::process::C
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
     println!();
+
+    // The daemon never became IPC-responsive within the timeout (e.g. a slow
+    // model still generating the depth map/mesh). Leaving it running would
+    // create an orphaned process that `waydeeper stop` can't see yet (it has
+    // no socket) and that keeps competing for CPU/GPU with daemons for other
+    // monitors. Kill it so the caller can retry cleanly instead of ending up
+    // with an unkillable "ghost" daemon.
+    println!("Killing unresponsive daemon process for monitor {}...", monitor);
+    kill_child(child);
     false
+}
+
+/// Terminate a child process: try SIGTERM first, escalate to SIGKILL if it
+/// doesn't exit promptly, then reap it so it doesn't linger as a zombie.
+fn kill_child(child: &mut std::process::Child) {
+    let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 // ---------------------------------------------------------------------------
@@ -934,22 +960,39 @@ fn cmd_stop(monitor: Option<&str>) -> Result<()> {
     match monitor {
         Some(name) => {
             let client = DaemonClient::new(name)?;
+            let mut any_stopped = false;
             if client.is_running() {
                 println!("Stopping wallpaper daemon for monitor {}...", name);
                 if ipc::stop_daemon(name, Duration::from_secs(5))? {
                     println!("Wallpaper daemon stopped for monitor {}.", name);
-                    Ok(())
+                    any_stopped = true;
                 } else {
                     println!("Failed to stop daemon for monitor {}.", name);
-                    Err(anyhow!("Failed to stop daemon"))
                 }
             } else {
                 println!("No wallpaper daemon is running for monitor {}.", name);
+            }
+
+            // Catch daemons that are still starting up (no IPC socket yet, e.g.
+            // stuck generating a depth map/mesh) — invisible to the check above.
+            let killed = kill_orphaned_daemon_run_processes(Some(name));
+            if killed > 0 {
+                println!(
+                    "Killed {} unresponsive daemon process(es) for monitor {} (no IPC socket yet).",
+                    killed, name
+                );
+                any_stopped = true;
+            }
+
+            if any_stopped {
                 Ok(())
+            } else {
+                Err(anyhow!("Failed to stop daemon"))
             }
         }
         None => {
             let running = ipc::list_running_daemons()?;
+            let mut any_stopped = false;
             if running.is_empty() {
                 println!("No wallpaper daemon is running.");
             } else {
@@ -957,10 +1000,112 @@ fn cmd_stop(monitor: Option<&str>) -> Result<()> {
                 let results = ipc::stop_all_daemons(Duration::from_secs(5))?;
                 let stopped = results.values().filter(|&&success| success).count();
                 println!("Stopped {} wallpaper daemon(s).", stopped);
+                any_stopped = stopped > 0;
             }
+
+            let killed = kill_orphaned_daemon_run_processes(None);
+            if killed > 0 {
+                println!(
+                    "Killed {} unresponsive daemon process(es) (no IPC socket yet).",
+                    killed
+                );
+                any_stopped = true;
+            }
+
+            let _ = any_stopped;
             Ok(())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Orphaned daemon-run process cleanup (no IPC socket bound yet)
+// ---------------------------------------------------------------------------
+
+/// Find running `waydeeper daemon-run` processes by scanning /proc, optionally
+/// filtered to a specific `--monitor`/`-m` value. These are processes that
+/// `DaemonClient`/`list_running_daemons` can't see because they haven't bound
+/// their IPC socket yet (still generating a depth map or 3D mesh, or hung).
+fn find_daemon_run_pids(monitor: Option<&str>) -> Vec<i32> {
+    let mut pids = Vec::new();
+    let self_pid = std::process::id();
+
+    let entries = match std::fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(_) => return pids,
+    };
+
+    for entry in entries.flatten() {
+        let pid: i32 = match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(pid) => pid,
+            None => continue,
+        };
+        if pid as u32 == self_pid {
+            continue;
+        }
+
+        let cmdline = match std::fs::read(entry.path().join("cmdline")) {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+        let args: Vec<String> = cmdline
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
+
+        let is_waydeeper_daemon_run = args.first()
+            .is_some_and(|arg0| Path::new(arg0).file_name().and_then(|n| n.to_str()) == Some("waydeeper"))
+            && args.iter().any(|a| a == "daemon-run");
+        if !is_waydeeper_daemon_run {
+            continue;
+        }
+
+        if let Some(target) = monitor {
+            let matches_monitor = args.windows(2).any(|pair| {
+                (pair[0] == "-m" || pair[0] == "--monitor") && pair[1] == target
+            });
+            if !matches_monitor {
+                continue;
+            }
+        }
+
+        pids.push(pid);
+    }
+
+    pids
+}
+
+/// Kill any matching orphaned `daemon-run` processes (SIGTERM, escalating to
+/// SIGKILL if they don't exit promptly). Returns the number killed.
+fn kill_orphaned_daemon_run_processes(monitor: Option<&str>) -> usize {
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+
+    let pids = find_daemon_run_pids(monitor);
+    let mut killed = 0;
+
+    for pid in pids {
+        let nix_pid = Pid::from_raw(pid);
+        if signal::kill(nix_pid, Signal::SIGTERM).is_err() {
+            continue; // already gone
+        }
+
+        let mut exited = false;
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(100));
+            if signal::kill(nix_pid, None).is_err() {
+                exited = true;
+                break;
+            }
+        }
+        if !exited {
+            let _ = signal::kill(nix_pid, Signal::SIGKILL);
+        }
+        killed += 1;
+    }
+
+    killed
 }
 
 fn cmd_list_monitors() -> Result<()> {

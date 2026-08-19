@@ -1516,7 +1516,7 @@ void main() {
 "#;
 
 const TRANSITION_FRAG: &str = r#"#version 300 es
-precision mediump float;
+precision highp float;
 uniform sampler2D u_old_texture;
 uniform float u_progress;
 uniform vec2 u_center;

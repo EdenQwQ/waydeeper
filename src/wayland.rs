@@ -233,6 +233,7 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
                 log::info!("Reload assets ready, preparing textures in background...");
                 // Prepare textures and mesh in background thread (image decode is slow)
                 let preparing = preparing_reload.clone();
+                let reload_state_clone = reload_state.clone();
                 std::thread::spawn(move || {
                     let wallpaper_result = EglRenderer::prepare_reload_textures(
                         &result.wallpaper_path,
@@ -274,7 +275,16 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
                             *preparing.lock().unwrap() = Some(pending);
                         }
                         Err(e) => {
+                            // Without this, `generating` stays true forever since
+                            // nothing else clears it on this failure path — the
+                            // daemon would silently ignore every future reload
+                            // request from here on (RELOAD still stores new
+                            // params, but the main loop never picks them up
+                            // because it's gated on `!generating`).
                             log::warn!("Texture prepare failed: {}", e);
+                            reload_state_clone.push_log(format!("Reload failed: texture prepare error: {}", e));
+                            reload_state_clone.mark_reload_complete();
+                            reload_state_clone.generating.store(false, Ordering::SeqCst);
                         }
                     }
                 });
@@ -283,14 +293,29 @@ pub fn run(config: RendererConfig, running: Arc<AtomicBool>, reload_state: Arc<R
 
         // Check if background texture preparation is done — capture old wallpaper, upload new, transition
         if let Some(pending) = preparing_reload.lock().unwrap().take() {
-            // Capture current frame (old wallpaper) right before the swap
+            // Render one frame with the still-current (old) textures so the
+            // backbuffer actually holds valid, freshly-drawn pixels. Without
+            // this, start_transition()'s framebuffer snapshot below reads
+            // whatever was left in the backbuffer after the *previous*
+            // swap_buffers() call — which EGL does not guarantee to preserve
+            // (default swap behavior is "buffer destroyed"), so the "old
+            // wallpaper" snapshot ends up garbage/stale and the transition
+            // is invisible even though nothing errors.
+            let _ = app.renderer.draw();
+            // Capture that just-drawn frame (old wallpaper) right before the swap
             if let Err(e) = app.renderer.start_transition() {
                 log::warn!("Transition start failed: {}", e);
             }
             // Upload new textures (fast GPU operation)
             app.renderer.set_pending_reload(pending);
             if let Err(e) = app.renderer.try_apply_pending_reload() {
+                // Same reasoning as the texture-prepare failure path above:
+                // clear `generating` here too, or the daemon gets stuck
+                // ignoring all future reload requests after this one error.
                 log::warn!("Failed to apply pending reload: {}", e);
+                reload_state.push_log(format!("Reload failed: {}", e));
+                reload_state.mark_reload_complete();
+                reload_state.generating.store(false, Ordering::SeqCst);
             } else {
                 reload_state.push_log("Reload complete, wallpaper updated seamlessly".to_string());
                 reload_state.mark_reload_complete();
